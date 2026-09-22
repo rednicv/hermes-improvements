@@ -82,9 +82,8 @@ def _find_function_end(lines: list[str], func_def_prefix: str) -> int | None:
     """
     Find the last line index of a function definition.
 
-    Scans lines after a 'def <func_def_prefix>(' match and returns the
-    index of the last line that is still indented (inside the function body).
-    Returns None if the function is not found.
+    First finds the start of the function, scans past the parameter list
+    until the colon closing the header, and then finds the last line of the body.
     """
     # Find the beginning of the function
     start_idx = None
@@ -96,12 +95,21 @@ def _find_function_end(lines: list[str], func_def_prefix: str) -> int | None:
     if start_idx is None:
         return None
 
-    # Find the first line after start_idx with indent 0 (end of function)
-    for i in range(start_idx + 1, len(lines)):
+    # Step 1: Find where the function signature header actually ends (the colon after args)
+    body_start_idx = None
+    for i in range(start_idx, len(lines)):
+        stripped = lines[i].strip()
+        if stripped.endswith(':'):
+            body_start_idx = i + 1
+            break
+
+    if body_start_idx is None:
+        return None
+
+    # Step 2: Find the first unindented non-empty line AFTER the body has started
+    for i in range(body_start_idx, len(lines)):
         stripped = lines[i].strip()
         if stripped and not lines[i].startswith(' ') and not lines[i].startswith('\t'):
-            # First unindented line after function = function ended
-            # Last line of the function is i-1
             return i - 1
 
     return len(lines) - 1
