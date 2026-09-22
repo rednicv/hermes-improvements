@@ -200,13 +200,17 @@ def initialize_hermes_improvements(
         # Prag RAM minim: 2GB liberi pentru SentenceTransformer
         _free_ram = 0
         try:
-            with open('/proc/meminfo') as _f:
-                for _line in _f:
-                    if _line.startswith('MemAvailable:'):
-                        _free_ram = int(_line.split()[1]) // 1024  # KiB → MB
-                        break
+            import psutil
+            _free_ram = int(psutil.virtual_memory().available // (1024 * 1024))
         except Exception:
-            pass
+            try:
+                with open('/proc/meminfo') as _f:
+                    for _line in _f:
+                        if _line.startswith('MemAvailable:'):
+                            _free_ram = int(_line.split()[1]) // 1024  # KiB → MB
+                            break
+            except Exception:
+                _free_ram = 4096  # fallback default if memory stats unavailable
 
         if _free_ram < 2048:  # < 2GB liberi
             logger.warning("⚠️ VectorMemory: doar %d MB RAM liber (prag minim 2048 MB) — dezactivat", _free_ram)

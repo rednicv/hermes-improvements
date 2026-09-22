@@ -302,7 +302,7 @@ class AdaptiveSoul:
         if not concrete:
             return ""
 
-        lines = ["\n## Learned rules from feedback (apply MANDATORY)"]
+        lines = ["\n## Reguli învățate din feedback (se aplică MANDATORIU)"]
         for instruction in concrete:
             lines.append(f"- {instruction}")
 

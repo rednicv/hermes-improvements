@@ -77,6 +77,21 @@ class VectorMemoryStore:
         else:
             logger.debug("No existing vector DB at %s, starting fresh", self.db_path)
 
+        # Auto-index MEMORY.md if memory_vectors.db is empty
+        if not self._index:
+            memory_file = self.memory_dir / "MEMORY.md"
+            if memory_file.exists():
+                try:
+                    lines = memory_file.read_text(encoding="utf-8").splitlines()
+                    entries = [
+                        {"action": "add", "target": "MEMORY.md", "content": line.strip()}
+                        for line in lines if line.strip()
+                    ]
+                    if entries:
+                        self.sync_from_memory(entries)
+                except Exception as e:
+                    logger.warning("Failed to auto-index MEMORY.md: %s", e)
+
         self._loaded = True
 
     _save_lock = None  # lazy-init class-level lock
@@ -122,8 +137,11 @@ class VectorMemoryStore:
         if cls._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
-                cls._model = SentenceTransformer(cls._MODEL_PATH)
-                logger.info("✅ SentenceTransformer model loaded (%s)", cls._MODEL_PATH)
+                path = cls._MODEL_PATH
+                if not Path(path).exists() and not os.environ.get("HERMES_EMBEDDING_MODEL"):
+                    path = "all-MiniLM-L6-v2"
+                cls._model = SentenceTransformer(path)
+                logger.info("✅ SentenceTransformer model loaded (%s)", path)
             except Exception as e:
                 logger.warning("SentenceTransformer unavailable, using TF-IDF: %s", e)
                 cls._model = False  # Mark as unavailable
@@ -284,6 +302,11 @@ class VectorMemoryStore:
         scores = []
         for key, entry in self._index.items():
             emb = entry.get("embedding")
+            if emb and len(emb) != len(query_vec):
+                text = entry.get("text_preview", "")
+                if text:
+                    emb = self._compute_embedding(text)
+                    entry["embedding"] = emb
             if emb and len(emb) == len(query_vec):
                 score = self._cosine_similarity(query_vec, emb)
                 scores.append((key, score, entry))
