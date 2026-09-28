@@ -79,19 +79,18 @@ class VectorMemoryStore:
 
         self._loaded = True
 
-    _save_lock = None  # lazy-init class-level lock
+    import threading
+    _save_lock = threading.Lock()  # class-level lock at import time
 
     @classmethod
     def _get_save_lock(cls):
-        if cls._save_lock is None:
-            import threading
-            cls._save_lock = threading.Lock()
         return cls._save_lock
 
     def _save(self):
         """Persist index to disk atomically with thread + inter-process safety."""
         import os, fcntl
         lock_path = self.db_path.with_suffix(".lock")
+        snapshot = dict(self._index)
         with self._get_save_lock():  # thread-safety (same process)
             with open(lock_path, 'w') as lf:
                 fcntl.flock(lf, fcntl.LOCK_EX)  # inter-process safety
@@ -100,7 +99,7 @@ class VectorMemoryStore:
                     pid = os.getpid()
                     tmp = self.db_path.with_suffix(f".{pid}.tmp")
                     with open(tmp, 'w') as f:
-                        json.dump(self._index, f, indent=2)
+                        json.dump(snapshot, f, indent=2)
                         f.flush()
                         os.fsync(f.fileno())
                     if tmp.exists():
@@ -363,7 +362,9 @@ class VectorMemoryStore:
             if not content:
                 continue
 
-            key = f"{target}:{hash(content) & 0xFFFFFFFF:08x}"
+            import hashlib
+            content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+            key = f"{target}:{content_hash}"
 
             if action == "remove":
                 self.remove(key)

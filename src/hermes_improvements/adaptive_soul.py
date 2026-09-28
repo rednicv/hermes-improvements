@@ -137,12 +137,16 @@ class AdaptiveSoul:
     def _persist_feedback(self, feedback: BehaviorFeedback):
         """Append feedback as JSONL line with file locking."""
         import fcntl
+        import os
         try:
             with open(self.feedback_log_path, 'a') as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                f.write(json.dumps(asdict(feedback)) + '\n')
-                f.flush()
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    f.write(json.dumps(asdict(feedback)) + '\n')
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except OSError as e:
             logger.error("Failed to persist feedback: %s", e)
         except ImportError:
@@ -276,6 +280,9 @@ class AdaptiveSoul:
             tmp = self.rules_path.with_suffix(".tmp")
             with open(tmp, 'w') as f:
                 json.dump(rules_dict, f, indent=2)
+                f.flush()
+                import os
+                os.fsync(f.fileno())
             tmp.replace(self.rules_path)
         except OSError as e:
             logger.error("Failed to persist rules: %s", e)
