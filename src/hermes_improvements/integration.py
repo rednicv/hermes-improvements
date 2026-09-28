@@ -200,13 +200,17 @@ def initialize_hermes_improvements(
         # Prag RAM minim: 2GB liberi pentru SentenceTransformer
         _free_ram = 0
         try:
-            with open('/proc/meminfo') as _f:
-                for _line in _f:
-                    if _line.startswith('MemAvailable:'):
-                        _free_ram = int(_line.split()[1]) // 1024  # KiB → MB
-                        break
+            import psutil
+            _free_ram = int(psutil.virtual_memory().available // (1024 * 1024))
         except Exception:
-            pass
+            try:
+                with open('/proc/meminfo') as _f:
+                    for _line in _f:
+                        if _line.startswith('MemAvailable:'):
+                            _free_ram = int(_line.split()[1]) // 1024  # KiB → MB
+                            break
+            except Exception:
+                _free_ram = 4096  # fallback default if memory stats unavailable
 
         if _free_ram < 2048:  # < 2GB liberi
             logger.warning("⚠️ VectorMemory: doar %d MB RAM liber (prag minim 2048 MB) — dezactivat", _free_ram)
@@ -264,6 +268,16 @@ def initialize_hermes_improvements(
     except Exception as e:
         logger.warning("Failed to init reasoning tracer: %s", e)
         components["reasoning_tracer"] = None
+
+    # 6. Anchor Ledger (Web Evidence & Drift Store)
+    try:
+        from improvements.anchor_ledger import AnchorLedger
+        al = AnchorLedger(hermes_home / "memories")
+        components["anchor_ledger"] = al
+        logger.info("✅ Anchor ledger initialized")
+    except Exception as e:
+        logger.warning("Failed to init anchor ledger: %s", e)
+        components["anchor_ledger"] = None
 
     # Attach to agent instance
     agent_instance._hermes_improvements = components
@@ -638,6 +652,16 @@ def build_turn_context_block(
             lines.append(f"- [{key}] {text[:220]}")
         if len(lines) > 1:
             sections.append("\n".join(lines))
+
+    # 5. Verified Anchor Evidence
+    al = improvements.get("anchor_ledger")
+    if al:
+        try:
+            anchor_block = al.format_context_block(max_entries=3)
+            if anchor_block:
+                sections.append(anchor_block)
+        except Exception as e:
+            logger.warning("Anchor ledger formatting failed: %s", e)
 
     if not sections:
         return ""
