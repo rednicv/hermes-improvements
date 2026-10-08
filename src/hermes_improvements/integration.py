@@ -35,6 +35,7 @@ silently change observable output.
 """
 
 import atexit
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -956,7 +957,7 @@ def _install_turn_hook(agent_instance, cfg: dict) -> bool:
                     )
                     # Re-injecting an identical block every turn only grows the
                     # history; the first copy stays visible in context.
-                    fp = hash(block)
+                    fp = hashlib.sha256(block.encode("utf-8")).hexdigest()
                     if block and fp != getattr(agent_instance, "_hermes_last_block_fp", None):
                         enriched = f"{block}\n\n{clean}"
                         if style == "positional":

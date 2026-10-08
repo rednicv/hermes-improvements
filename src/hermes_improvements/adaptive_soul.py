@@ -74,17 +74,32 @@ class AdaptiveSoul:
 
     # ─── Persistence ──────────────────────────────────────────────
 
+    MAX_FEEDBACK_ENTRIES = 5000
+
     def _load_history(self):
         """Load feedback history and rules from disk."""
         if self.feedback_log_path.exists():
             try:
+                lines = []
                 with open(self.feedback_log_path, 'r') as f:
                     for line in f:
                         line = line.strip()
-                        if not line:
-                            continue
-                        data = json.loads(line)
-                        self.feedback_history.append(BehaviorFeedback(**data))
+                        if line:
+                            lines.append(line)
+
+                # Rotate if too large
+                if len(lines) > self.MAX_FEEDBACK_ENTRIES:
+                    lines = lines[-self.MAX_FEEDBACK_ENTRIES:]
+                    try:
+                        with open(self.feedback_log_path, 'w') as f:
+                            for l in lines:
+                                f.write(l + '\n')
+                    except Exception as e:
+                        logger.warning("Failed to truncate feedback history file: %s", e)
+
+                for line in lines:
+                    data = json.loads(line)
+                    self.feedback_history.append(BehaviorFeedback(**data))
             except Exception as e:
                 logger.warning("Failed to load feedback history: %s", e)
 
@@ -361,10 +376,17 @@ class AdaptiveSoul:
 
         return instructions[:8]  # max 8 rules in prompt
 
-    def record_behavior(self, outcome: str = ""):
-        """Increment hit counters for active rules."""
-        for rule in self.get_active_rules():
-            rule.hits += 1
+    def record_behavior(self, outcome: str = "", applied_rule_names: Optional[List[str]] = None):
+        """Increment hit counters for rules applied in this turn."""
+        if applied_rule_names is not None:
+            for name in applied_rule_names:
+                rule = self.adaptive_rules.get(name)
+                if rule:
+                    rule.hits += 1
+        else:
+            # Fallback: increment only active rules if no specific rules passed
+            for rule in self.get_active_rules():
+                rule.hits += 1
 
     def get_behavioral_stats(self) -> Dict[str, Any]:
         """Get statistics about adaptive behavior."""

@@ -14,6 +14,7 @@ Design:
 """
 
 import json
+import hashlib
 import logging
 import os
 import time
@@ -103,14 +104,34 @@ class VectorMemoryStore:
 
     def _save(self):
         """Persist index to disk atomically with thread + inter-process safety."""
-        import os, fcntl
+        import os
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+
         lock_path = self.db_path.with_suffix(".lock")
         snapshot = dict(self._index)
         with self._get_save_lock():  # thread-safety (same process)
-            with open(lock_path, 'w') as lf:
-                fcntl.flock(lf, fcntl.LOCK_EX)  # inter-process safety
+            if fcntl is not None:
+                with open(lock_path, 'w') as lf:
+                    fcntl.flock(lf, fcntl.LOCK_EX)  # inter-process safety
+                    try:
+                        pid = os.getpid()
+                        tmp = self.db_path.with_suffix(f".{pid}.tmp")
+                        with open(tmp, 'w') as f:
+                            json.dump(snapshot, f, indent=2)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        if tmp.exists():
+                            tmp.replace(self.db_path)
+                    except OSError as e:
+                        logger.warning("Vector DB save transient error (race): %s", e)
+                    finally:
+                        fcntl.flock(lf, fcntl.LOCK_UN)
+            else:
+                # Fallback for systems without fcntl (e.g. Windows)
                 try:
-                    # Use PID-based temp name so concurrent processes don't clash
                     pid = os.getpid()
                     tmp = self.db_path.with_suffix(f".{pid}.tmp")
                     with open(tmp, 'w') as f:
@@ -120,9 +141,7 @@ class VectorMemoryStore:
                     if tmp.exists():
                         tmp.replace(self.db_path)
                 except OSError as e:
-                    logger.warning("Vector DB save transient error (race): %s", e)
-                finally:
-                    fcntl.flock(lf, fcntl.LOCK_UN)
+                    logger.warning("Vector DB save transient error: %s", e)
 
     # ─── Embedding ────────────────────────────────────────────────────
 
@@ -237,7 +256,8 @@ class VectorMemoryStore:
         for pos, word in enumerate(words[:200]):
             weight = 1.0 / (1.0 + pos * 0.05)
             for i in range(len(word) - 2):
-                h = hash(word[i:i + 3]) % dim
+                trigram = word[i:i + 3]
+                h = int.from_bytes(hashlib.sha256(trigram.encode("utf-8")).digest()[:4], "little") % dim
                 vec[h] += weight * 0.1
         norm = sum(v * v for v in vec) ** 0.5
         if norm > 0:
@@ -299,6 +319,7 @@ class VectorMemoryStore:
         query_vec = self._compute_embedding(query)
 
         scores = []
+        updated_any = False
         for key, entry in self._index.items():
             emb = entry.get("embedding")
             if emb and len(emb) != len(query_vec):
@@ -306,9 +327,16 @@ class VectorMemoryStore:
                 if text:
                     emb = self._compute_embedding(text)
                     entry["embedding"] = emb
+                    updated_any = True
             if emb and len(emb) == len(query_vec):
                 score = self._cosine_similarity(query_vec, emb)
                 scores.append((key, score, entry))
+
+        if updated_any:
+            try:
+                self._save()
+            except Exception as e:
+                logger.warning("Failed to persist updated embeddings in vector memory: %s", e)
 
         scores.sort(key=lambda x: x[1], reverse=True)
 
