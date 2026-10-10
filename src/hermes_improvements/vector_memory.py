@@ -65,6 +65,23 @@ class VectorMemoryStore:
 
     # ─── Persistence ──────────────────────────────────────────────────
 
+    def _reconcile_dimensions(self):
+        """Ensure all stored embeddings match current embedding model dimension (read-only in search)."""
+        if not self._index:
+            return
+        sample_vec = self._compute_embedding("test")
+        target_dim = len(sample_vec)
+        updated = False
+        for entry in self._index.values():
+            emb = entry.get("embedding")
+            if emb and len(emb) != target_dim:
+                text = entry.get("text_preview", "")
+                if text:
+                    entry["embedding"] = self._compute_embedding(text)
+                    updated = True
+        if updated:
+            self._save()
+
     def _load(self):
         """Load existing embeddings from disk."""
         if self._loaded:
@@ -98,6 +115,11 @@ class VectorMemoryStore:
                         self.sync_from_memory(entries)
                 except Exception as e:
                     logger.warning("Failed to auto-index MEMORY.md: %s", e)
+        else:
+            try:
+                self._reconcile_dimensions()
+            except Exception as e:
+                logger.warning("Dimension reconciliation failed: %s", e)
 
         self._loaded = True
 
@@ -326,24 +348,11 @@ class VectorMemoryStore:
         query_vec = self._compute_embedding(query)
 
         scores = []
-        updated_any = False
         for key, entry in self._index.items():
             emb = entry.get("embedding")
-            if emb and len(emb) != len(query_vec):
-                text = entry.get("text_preview", "")
-                if text:
-                    emb = self._compute_embedding(text)
-                    entry["embedding"] = emb
-                    updated_any = True
             if emb and len(emb) == len(query_vec):
                 score = self._cosine_similarity(query_vec, emb)
                 scores.append((key, score, entry))
-
-        if updated_any:
-            try:
-                self._save()
-            except Exception as e:
-                logger.warning("Failed to persist updated embeddings in vector memory: %s", e)
 
         scores.sort(key=lambda x: x[1], reverse=True)
 
