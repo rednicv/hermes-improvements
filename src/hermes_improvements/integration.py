@@ -466,6 +466,7 @@ _FEEDBACK_PATTERNS = [
     ("tone", 1, [
         "bravo", "perfect așa", "perfect asa", "îmi place", "imi place",
         "exact așa", "exact asa", "well done", "exactly right",
+        "așa da", "asa da", "excelent", "foarte bun", "bun așa", "bun asa",
     ]),
 ]
 
