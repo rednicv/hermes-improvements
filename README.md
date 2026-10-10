@@ -110,7 +110,7 @@ python3 src/inject_hook.py
 Check if the improvements package is initialized properly:
 ```bash
 python3 -c "import sys, os; sys.path.insert(0, os.path.expanduser('~/.hermes')); import improvements; print(improvements.__version__)"
-# Output: 3.2.0
+# Output: 3.2.1
 ```
 
 ---
