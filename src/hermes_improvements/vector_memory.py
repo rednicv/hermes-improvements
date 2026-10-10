@@ -319,9 +319,18 @@ class VectorMemoryStore:
             self._save()
 
     def update(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True):
-        """Update an existing entry or add if new."""
-        existing = self._index.get(key, {})
-        new_meta = {**existing.get("metadata", {}), **(metadata or {})}
+        """Update an existing entry or add if new. Skips re-embedding if text is unchanged."""
+        existing = self._index.get(key)
+        if existing and existing.get("text_preview") == text:
+            # Skip redundant re-embedding; update metadata only
+            if metadata:
+                existing["metadata"] = {**existing.get("metadata", {}), **metadata}
+                existing["updated_at"] = time.time()
+                if auto_save:
+                    self._save()
+            return
+
+        new_meta = {**(existing.get("metadata", {}) if existing else {}), **(metadata or {})}
         self.add(key, text, new_meta, auto_save=auto_save)
 
     def remove(self, key: str):

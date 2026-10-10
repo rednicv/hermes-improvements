@@ -791,7 +791,7 @@ def persist_session_learnings(agent_instance):
     dm = improvements.get("dynamic_memory")
     vs = improvements.get("vector_store")
     if dm and vs:
-        mutations = dm.get_recent_mutations()
+        mutations = dm.flush() if hasattr(dm, "flush") else dm.get_recent_mutations()
         if mutations:
             vs.sync_from_memory(mutations)
             learned.append(f"sync {len(mutations)} memory mutations to vector index")
@@ -857,13 +857,29 @@ def persist_session_learnings(agent_instance):
             }
 
             # Append one JSON line per session (JSONL — easy to append)
+            # Append one JSON line per session with flock fallback and rotation at 2000 lines
             import json as _json
-            import fcntl
-            with open(conclusions_path, 'a') as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                f.write(_json.dumps(session_summary) + "\n")
-                fcntl.flock(f, fcntl.LOCK_UN)
+            try:
+                import fcntl
+            except ImportError:
+                fcntl = None
 
+            with open(conclusions_path, 'a') as f:
+                if fcntl:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                f.write(_json.dumps(session_summary) + "
+")
+                if fcntl:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+
+            try:
+                with open(conclusions_path, 'r') as f:
+                    _c_lines = f.readlines()
+                if len(_c_lines) > 2000:
+                    with open(conclusions_path, 'w') as f:
+                        f.writelines(_c_lines[-1500:])
+            except Exception:
+                pass
             learned.append(
                 f"saved {len(session_summary['key_learnings'])} session conclusions"
             )
