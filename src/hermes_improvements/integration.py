@@ -867,8 +867,7 @@ def persist_session_learnings(agent_instance):
             with open(conclusions_path, 'a') as f:
                 if fcntl:
                     fcntl.flock(f, fcntl.LOCK_EX)
-                f.write(_json.dumps(session_summary) + "
-")
+                f.write(_json.dumps(session_summary) + "\n")
                 if fcntl:
                     fcntl.flock(f, fcntl.LOCK_UN)
 
