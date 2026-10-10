@@ -43,6 +43,7 @@ class AdaptiveRule:
     confidence: float  # How sure we are (0.0-1.0)
     learned_from: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    last_hit: float = field(default_factory=time.time)
     hits: int = 0  # How often successfully applied
 
 
@@ -267,17 +268,17 @@ class AdaptiveSoul:
     def _persist_rules(self):
         """Save adaptive rules to JSON, with limits and expiration."""
         try:
-            # 1. Remove expired rules (>30 days)
+            # 1. Remove expired rules (inactive for >30 days)
             now = time.time()
             cutoff = now - (self.rule_ttl_days * 86400)
             expired = [
                 name for name, rule in self.adaptive_rules.items()
-                if rule.created_at < cutoff
+                if getattr(rule, 'last_hit', rule.created_at) < cutoff
             ]
             for name in expired:
                 del self.adaptive_rules[name]
             if expired:
-                logger.info("AdaptiveSoul: removed %d expired rules (>%d days)", len(expired), self.rule_ttl_days)
+                logger.info("AdaptiveSoul: removed %d expired rules (>%d days inactive)", len(expired), self.rule_ttl_days)
 
             # 2. Keep only top N rules (sorted by priority)
             sorted_rules = sorted(
@@ -377,16 +378,19 @@ class AdaptiveSoul:
         return instructions[:8]  # max 8 rules in prompt
 
     def record_behavior(self, outcome: str = "", applied_rule_names: Optional[List[str]] = None):
-        """Increment hit counters for rules applied in this turn."""
+        """Increment hit counters and update last_hit timestamp for rules applied in this turn."""
+        now = time.time()
         if applied_rule_names is not None:
             for name in applied_rule_names:
                 rule = self.adaptive_rules.get(name)
                 if rule:
                     rule.hits += 1
+                    rule.last_hit = now
         else:
             # Fallback: increment only active rules if no specific rules passed
             for rule in self.get_active_rules():
                 rule.hits += 1
+                rule.last_hit = now
 
     def get_behavioral_stats(self) -> Dict[str, Any]:
         """Get statistics about adaptive behavior."""

@@ -54,6 +54,12 @@ class VectorMemoryStore:
         # In-memory index: key -> {embedding, metadata, timestamp}
         self._index: Dict[str, Dict[str, Any]] = {}
         self._loaded = False
+        
+        # Generation counter & cache for TF-IDF / vocabulary (Opus 5.5 recommendation)
+        self._generation = 0
+        self._cache_generation = -1
+        self._vocab_cache: Optional[Dict[str, int]] = None
+        self._df_cache: Optional[Dict[str, int]] = None
 
         self._load()
 
@@ -104,6 +110,7 @@ class VectorMemoryStore:
 
     def _save(self):
         """Persist index to disk atomically with thread + inter-process safety."""
+        self._generation += 1
         import os
         try:
             import fcntl
@@ -178,13 +185,16 @@ class VectorMemoryStore:
         tokens = re.findall(r"[a-zA-ZăâîșțĂÂÎȘȚ]{3,}", text.lower())
         return [t for t in tokens if t not in self._STOPWORDS]
 
-    def _build_vocab(self) -> Dict[str, int]:
-        """Build vocabulary from all indexed texts. Returns word→index map."""
+    def _build_vocab(self) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """Build vocabulary & doc frequencies from all indexed texts with generation cache."""
+        if self._cache_generation == self._generation and self._vocab_cache is not None and self._df_cache is not None:
+            return self._vocab_cache, self._df_cache
+
         from collections import Counter
         df: Counter = Counter()  # document frequency
         n_docs = len(self._index)
         if n_docs == 0:
-            return {}
+            return {}, {}
         for entry in self._index.values():
             words = set(self._tokenize(entry.get("text_preview", "")))
             df.update(words)
@@ -194,7 +204,10 @@ class VectorMemoryStore:
             for idx, (word, count) in enumerate(df.most_common(512))
             if count > 1 or n_docs <= 5
         }
-        return vocab
+        self._vocab_cache = vocab
+        self._df_cache = dict(df)
+        self._cache_generation = self._generation
+        return vocab, self._df_cache
 
     def _compute_embedding(self, text: str) -> List[float]:
         """
@@ -215,7 +228,7 @@ class VectorMemoryStore:
 
     def _tfidf_embed(self, text: str) -> List[float]:
         import math
-        vocab = self._build_vocab()
+        vocab, df_counts = self._build_vocab()
         if not vocab:
             return self._trigram_embed(text, dim=128)
 
@@ -229,12 +242,6 @@ class VectorMemoryStore:
         for t in tokens:
             tf[t] = tf.get(t, 0) + 1
         max_tf = max(tf.values())
-
-        # IDF from existing index
-        df_counts: Dict[str, int] = {}
-        for entry in self._index.values():
-            for w in set(self._tokenize(entry.get("text_preview", ""))):
-                df_counts[w] = df_counts.get(w, 0) + 1
 
         vec = [0.0] * len(vocab)
         for word, idx in vocab.items():
