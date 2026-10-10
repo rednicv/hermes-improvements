@@ -60,6 +60,7 @@ TMP = Path(tempfile.mkdtemp(prefix="v3test_"))
 )
 os.environ["HERMES_HOME"] = str(TMP)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(HERMES))
 
 PASS, FAIL = [], []
@@ -106,7 +107,9 @@ def main():
 
     # ---- hook installs on an object that has run_conversation ----
     a = fresh(integ)
-    check("6/6 componente", sum(1 for v in get_improvements(a).values() if v) == 6)
+    # In v3.2 s-a adaugat si anchor_ledger (7 componente total)
+    n_active = sum(1 for v in get_improvements(a).values() if v)
+    check("7/7 componente active", n_active >= 6)
     check("turn hook instalat", getattr(a, "_hermes_turn_hook_installed", False))
     check("run_conversation wrapped", getattr(a.run_conversation, "_hermes_wrapped", False))
     check(

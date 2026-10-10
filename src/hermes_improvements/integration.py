@@ -38,6 +38,7 @@ import atexit
 import hashlib
 import logging
 import time
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -188,11 +189,15 @@ def initialize_hermes_improvements(
         }
     """
     if hermes_home is None:
-        try:
-            from hermes_constants import get_hermes_home as _get_home
-            hermes_home = _get_home()
-        except ImportError:
-            hermes_home = Path.home() / ".hermes"
+        env_home = os.environ.get("HERMES_HOME")
+        if env_home:
+            hermes_home = Path(env_home)
+        else:
+            try:
+                from hermes_constants import get_hermes_home as _get_home
+                hermes_home = _get_home()
+            except ImportError:
+                hermes_home = Path.home() / ".hermes"
 
     components = {}
 
