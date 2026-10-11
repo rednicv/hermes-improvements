@@ -11,7 +11,7 @@ It introduces dynamic vector-backed memory retrieval, adaptive persona alignment
 
 ---
 
-## 🚀 What's New in v3.5.1 (Opus 5.5 Deep Audit Hardening)
+## 🚀 What's New in v3.5.1 (Production & Security Hardening)
 
 1. **Thread-Safe Search Iteration**:
    - `search()` iterates over a safe key snapshot (`list(self._index.keys())`), preventing `RuntimeError: dictionary changed size during iteration` during concurrent re-embeddings or background writes.

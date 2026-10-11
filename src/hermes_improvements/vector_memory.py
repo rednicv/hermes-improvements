@@ -105,7 +105,7 @@ class VectorMemoryStore:
         self._index: Dict[str, Dict[str, Any]] = {}
         self._loaded = False
         
-        # Generation counter & cache for TF-IDF / vocabulary (Opus 5.5 recommendation)
+        # Generation counter & cache for TF-IDF / vocabulary optimization
         self._generation = 0
         self._cache_generation = -1
         self._vocab_cache: Optional[Dict[str, int]] = None
