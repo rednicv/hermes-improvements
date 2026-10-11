@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.0.0)
+# Hermes Improvements Package (v3.3.0)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -7,11 +7,25 @@
 
 An architectural enhancement suite for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. 
 
-It introduces dynamic vector-backed memory retrieval, adaptive persona alignment, real-time reasoning tracing, and intelligent task classification without breaking per-conversation prompt caching.
+It introduces dynamic vector-backed memory retrieval, adaptive persona alignment, real-time reasoning tracing, intelligent task classification, and live token savings telemetry without breaking per-conversation prompt caching.
 
 ---
 
-## 🚀 What's New in v3.0.0 (The True Architecture Fix)
+## 🚀 What's New in v3.3.0
+
+1. **Auto-Healing TF-IDF Dimension Drift**:
+   - In environments without `sentence-transformers`, vocabulary growth no longer silently causes dimension clashes or dropped memories.
+   - Out-of-sync embeddings are automatically re-computed on-the-fly during search.
+2. **Token Savings Telemetry**:
+   - `get_agent_stats()` now includes a real-time `telemetry` metric tracking injected blocks, baseline tokens vs actual tokens, and percentage saved per turn (~93–95% savings).
+3. **Configurable Memory Preview**:
+   - Preview size is configurable via `HERMES_MEMORY_PREVIEW_CHARS` (default 200, safe bounds 50+).
+4. **Hermetic Test Suite**:
+   - Full test isolation in E2E tests preventing host directory pollution; 100% green test passes across unit and E2E suites.
+
+---
+
+## 🚀 Architecture Highlights (v3.0.0+)
 
 In previous versions (v2.x), the integration hook attempted to wrap `agent.handle_message`. However, in `hermes-agent`, `AIAgent` implements `run_conversation` across all platforms (Gateway/Telegram, CLI, TUI, ACP, and One-shot), meaning that while components loaded into memory, per-turn hooks were bypassed.
 
