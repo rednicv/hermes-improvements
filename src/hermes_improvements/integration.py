@@ -761,11 +761,29 @@ def get_agent_stats(agent_instance) -> dict:
     if wf:
         stats["components"]["workflow_metrics"] = wf.metrics.get_stats()
 
+    # Baseline without improvements is full injection: MEMORY.md + USER.md + raw soul rules (~2400 tokens / 9600 chars)
+    # Each turn improvements injects a selective block (~150 tokens / 600 chars).
+    # Token estimation: ~4 chars per token.
+    blocks_injected = int(getattr(agent_instance, "_hermes_blocks_injected", 0))
+    chars_injected = int(getattr(agent_instance, "_hermes_chars_injected", 0))
+    baseline_tokens_est = blocks_injected * 2400
+    actual_tokens_est = (chars_injected // 4) if chars_injected > 0 else (blocks_injected * 150)
+    saved_tokens_est = max(0, baseline_tokens_est - actual_tokens_est)
+
+    stats["telemetry"] = {
+        "blocks_injected": blocks_injected,
+        "chars_injected": chars_injected,
+        "est_baseline_tokens": baseline_tokens_est,
+        "est_actual_tokens": actual_tokens_est,
+        "est_tokens_saved": saved_tokens_est,
+        "est_savings_pct": round((saved_tokens_est / baseline_tokens_est * 100), 1) if baseline_tokens_est > 0 else 0.0,
+    }
+
     # v3: turn-hook counters, so "is it actually running?" is answerable live.
     stats["turn_hook"] = {
         "installed": bool(getattr(agent_instance, "_hermes_turn_hook_installed", False)),
         "turns_seen": int(getattr(agent_instance, "_hermes_turns_seen", 0)),
-        "blocks_injected": int(getattr(agent_instance, "_hermes_blocks_injected", 0)),
+        "blocks_injected": blocks_injected,
         "feedback_recorded": int(getattr(agent_instance, "_hermes_feedback_recorded", 0)),
     }
 
@@ -991,6 +1009,9 @@ def _install_turn_hook(agent_instance, cfg: dict) -> bool:
                         agent_instance._hermes_last_block_fp = fp
                         agent_instance._hermes_blocks_injected = (
                             getattr(agent_instance, "_hermes_blocks_injected", 0) + 1
+                        )
+                        agent_instance._hermes_chars_injected = (
+                            getattr(agent_instance, "_hermes_chars_injected", 0) + len(block)
                         )
                         injected = True
                         logger.info(

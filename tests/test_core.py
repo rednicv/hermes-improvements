@@ -37,6 +37,22 @@ def test_adaptive_soul_rules_loading(tmp_path):
     assert len(soul.feedback_history) == 1
 
 
+def test_tfidf_dimension_drift_regression(tmp_path, monkeypatch):
+    """Regression test: adding entries incrementally with TF-IDF fallback must not cause dimension clash."""
+    monkeypatch.setenv("HERMES_MEMORY_PREVIEW_CHARS", "300")
+    store = VectorMemoryStore(memory_dir=tmp_path)
+    # Add 40 entries with distinct vocabularies incrementally
+    store.add("k_0", "Prima memorie importanta despre python si arhitectura hermes.", metadata={"idx": 0})
+    for i in range(1, 40):
+        store.add(f"k_{i}", f"Memorie document secundar numarul {i} cu subiect specific si vocabular unic {i * 13}", metadata={"idx": i})
+    
+    # Search for the first entry
+    results = store.search("arhitectura hermes python", top_k=3)
+    keys = [r["key"] for r in results]
+    assert "k_0" in keys, f"k_0 should be retrieved via auto-re-embedding! Found: {keys}"
+    assert len(results[0]["text_preview"]) <= 300
+
+
 def test_adaptive_workflow_classification():
     workflow = AdaptiveWorkflow()
     

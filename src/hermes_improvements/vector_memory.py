@@ -24,6 +24,15 @@ from typing import Dict, List, Optional, Any, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _get_preview_limit() -> int:
+    """Get text preview character limit (configurable via env HERMES_MEMORY_PREVIEW_CHARS)."""
+    try:
+        val = int(os.environ.get("HERMES_MEMORY_PREVIEW_CHARS", 200))
+        return max(50, val)
+    except (ValueError, TypeError):
+        return 200
+
+
 class VectorMemoryStore:
     """
     Semantic search over memory entries using vector embeddings.
@@ -307,10 +316,11 @@ class VectorMemoryStore:
         """
         embedding = self._compute_embedding(text)
 
+        lim = _get_preview_limit()
         self._index[key] = {
             "embedding": embedding,
             "metadata": metadata or {},
-            "text_preview": text[:200],
+            "text_preview": text[:lim],
             "timestamp": time.time(),
             "updated_at": time.time(),
         }

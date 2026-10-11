@@ -161,12 +161,14 @@ def main():
     )
 
     # ---- VectorMemory prefetch reaches the block (the text_preview bug) ----
-    # Read-only against the REAL store: search() never writes. Building the store
-    # directly (not via initialize) avoids re-indexing and re-saving the real DB.
+    # ISOLATED: build against TMP memories to avoid polluting host and failing on clean nodes.
     from improvements.dynamic_memory import AdaptiveMemoryPrefetch
     from improvements.vector_memory import VectorMemoryStore
 
-    vs = VectorMemoryStore(HERMES / "memories")
+    mem_tmp = TMP / "memories"
+    mem_tmp.mkdir(parents=True, exist_ok=True)
+    vs = VectorMemoryStore(mem_tmp)
+    vs.add("remote-backup-node", "Cum merge backup-ul pe remote-backup-node cu rclone si snapshot automat zilnic.", auto_save=False)
     mem = AdaptiveMemoryPrefetch(vs).prefetch_relevant("cum merge backup-ul pe remote-backup-node?", max_entries=3)
     check("prefetch gaseste memorii", len(mem) > 0, f"{len(mem)} entries")
 
