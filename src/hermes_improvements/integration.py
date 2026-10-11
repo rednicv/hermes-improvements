@@ -614,7 +614,7 @@ def _sanitize_untrusted_text(text: str) -> str:
         return ""
     import unicodedata
 
-    # 1. Normalize unicode (NFKC) to resolve confusable homoglyphs & fullwidth tricks
+    # 1. Normalize unicode (NFKC) to resolve fullwidth and compatibility forms
     text = unicodedata.normalize("NFKC", str(text))
 
     # 2. Strip zero-width, bidi formatting and isolate characters
@@ -626,11 +626,23 @@ def _sanitize_untrusted_text(text: str) -> str:
     for ch in bad_chars:
         text = text.replace(ch, "")
 
-    # 3. Neutralize lookalike delimiters and system injection markers
-    text = text.replace("[hermes-improvements", "⟦hermes-improvements")
-    text = text.replace("[/hermes-improvements", "⟦/hermes-improvements")
-    text = text.replace("<system", "⟨system")
-    text = text.replace("</system", "⟨/system")
+    # 3. Homoglyph translation table (Cyrillic & Greek confusables matching Latin delimiter keywords)
+    homoglyphs = str.maketrans({
+        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
+        "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i",
+        "\u0458": "j", "\u0455": "s", "\u03bf": "o", "\u03c1": "p",
+        "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K",
+        "\u041c": "M", "\u041d": "H", "\u041e": "O", "\u0420": "P",
+        "\u0421": "C", "\u0422": "T", "\u0425": "X",
+    })
+    # Check normalized/de-homoglyphed representation for delimiter presence
+    dehomo = text.translate(homoglyphs)
+    if any(k in dehomo for k in ["[hermes-improvements", "[/hermes-improvements", "<system", "</system"]):
+        # Defang both raw and homoglyphed variants
+        for prefix in ["[hermes-improvements", "[/hermes-improvements", "<system", "</system"]:
+            if prefix in dehomo:
+                text = text.replace("[", "⟦").replace("]", "⟧").replace("<", "⟨").replace(">", "⟩")
+                break
 
     # 4. Neutralize markdown image exfiltration (![alt](http...)) and raw protocols
     text = text.replace("![", "[image-disabled: ")

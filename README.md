@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.5.1)
+# Hermes Improvements Package (v3.5.2)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,7 +11,16 @@ It introduces dynamic vector-backed memory retrieval, adaptive persona alignment
 
 ---
 
-## 🚀 What's New in v3.5.1 (Production & Security Hardening)
+## 🚀 What's New in v3.5.2 (Script Homoglyph Defanging)
+
+1. **Cyrillic & Greek Script Homoglyph Interception**:
+   - Enhanced `_sanitize_untrusted_text` with confusable character mapping (`str.maketrans`). Delimiter spoofing using cross-script visual lookalikes (e.g. Cyrillic `е`, `о`, `а`) is intercepted and defanged reliably.
+2. **Precision Unicode Scope Clarification**:
+   - Formally documented Unicode normalization boundaries (NFKC resolves fullwidth and compatibility forms, while script translation tables handle cross-alphabet confusables).
+
+---
+
+## 🚀 What's New in v3.5.1
 
 1. **Thread-Safe Search Iteration**:
    - `search()` iterates over a safe key snapshot (`list(self._index.keys())`), preventing `RuntimeError: dictionary changed size during iteration` during concurrent re-embeddings or background writes.
