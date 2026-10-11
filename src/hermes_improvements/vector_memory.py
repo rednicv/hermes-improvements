@@ -24,6 +24,7 @@ import sqlite3
 import time
 import unicodedata
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -270,9 +271,6 @@ class VectorMemoryStore:
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
-
-    # Context manager for auto-closing connections cleanly
-    from contextlib import contextmanager
 
     @contextmanager
     def _connection(self):
@@ -614,13 +612,16 @@ class VectorMemoryStore:
             self.bulk_add(to_upsert)
 
         # Atomic prune of orphaned keys in this target domain
-        for target, valid_keys in valid_keys_per_target.items():
-            with self._get_connection() as conn:
-                existing = conn.execute("SELECT key, metadata FROM memories").fetchall()
-                for r in existing:
-                    meta = json.loads(r["metadata"])
-                    if meta.get("target") == target and r["key"] not in valid_keys:
-                        conn.execute("DELETE FROM memories WHERE key = ?", (r["key"],))
+        with self._connection() as conn:
+            existing = conn.execute("SELECT key, metadata FROM memories").fetchall()
+            to_delete = []
+            for r in existing:
+                meta = json.loads(r["metadata"])
+                target = meta.get("target")
+                if target in valid_keys_per_target and r["key"] not in valid_keys_per_target[target]:
+                    to_delete.append((r["key"],))
+            if to_delete:
+                conn.executemany("DELETE FROM memories WHERE key = ?", to_delete)
 
     def get_memory_stats(self) -> Dict[str, Any]:
         """Return memory store statistics."""
