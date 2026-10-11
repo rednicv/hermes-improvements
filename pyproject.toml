@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-improvements"
-version = "4.0.1"
+version = "4.0.2"
 description = "Architectural enhancement suite for Hermes Agent: vector memory, adaptive soul, and workflow classification."
 readme = "README.md"
 authors = [

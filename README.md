@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v4.0.1)
+# Hermes Improvements Package (v4.0.2)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,7 +11,18 @@ It introduces dynamic vector-backed memory retrieval, adaptive persona alignment
 
 ---
 
-## 🚀 What's New in v4.0.1 (Lineage Precision & Resource Safety)
+## 🚀 What's New in v4.0.2 (Resource Leak Fix & 4.x E2E Suite)
+
+1. **Context-Managed SQLite Resource Cleanup**:
+   - Cleaned module-level `contextmanager` integration guaranteeing zero open SQLite descriptors across all database paths.
+2. **Atomic Single-Pass Key Pruning in `sync_from_memory`**:
+   - Pruning orphaned keys now runs via a consolidated `executemany` single transaction instead of per-target scans.
+3. **E2E Suite Version Modernization**:
+   - Updated validation test suite to assert major versions `("3.", "4.")` passing 100% (38/38 hermetic tests green).
+
+---
+
+## 🚀 What's New in v4.0.1
 
 1. **Deterministic Vocabulary Hashing in `model_id`**:
    - `TfidfBackend` embeds an 8-character SHA-256 fingerprint of the sorted vocabulary keys directly into `model_id` (`tfidf:{vocab_hash}`). Any vocabulary change immediately triggers precise vector invalidation.
