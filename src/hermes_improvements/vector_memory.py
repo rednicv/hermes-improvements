@@ -159,7 +159,12 @@ class TfidfBackend(EmbeddingBackend):
 
     @property
     def model_id(self) -> str:
-        return "tfidf:internal"
+        # Include deterministic hash of vocabulary words so model_id automatically changes on vocabulary drift
+        if not self._vocab:
+            return "tfidf:cold_start"
+        vocab_keys = "".join(sorted(self._vocab.keys()))
+        vh = hashlib.sha256(vocab_keys.encode("utf-8")).hexdigest()[:8]
+        return f"tfidf:{vh}"
 
     @property
     def dimension(self) -> int:
@@ -266,8 +271,20 @@ class VectorMemoryStore:
         conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
 
+    # Context manager for auto-closing connections cleanly
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _connection(self):
+        conn = self._get_connection()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self):
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memories (
                     key TEXT PRIMARY KEY,
@@ -317,7 +334,7 @@ class VectorMemoryStore:
         return backend
 
     def _get_all_texts(self) -> List[str]:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             rows = conn.execute("SELECT text FROM memories").fetchall()
             return [r["text"] for r in rows]
 
@@ -348,7 +365,7 @@ class VectorMemoryStore:
                     to_insert.append((k, text, preview, h, blob, "legacy:migrated", len(emb), json.dumps(meta), ts, ts))
 
                 if to_insert:
-                    with self._get_connection() as conn:
+                    with self._connection() as conn:
                         conn.executemany("""
                             INSERT OR REPLACE INTO memories
                             (key, text, text_preview, content_hash, vector, model_id, dim, metadata, created_at, updated_at)
@@ -389,7 +406,7 @@ class VectorMemoryStore:
         vec = self._backend.embed(text)
         blob = _pack_vector(vec)
 
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO memories
                 (key, text, text_preview, content_hash, vector, model_id, dim, metadata, created_at, updated_at)
@@ -425,7 +442,7 @@ class VectorMemoryStore:
             blob = _pack_vector(vec)
             rows.append((key, text, preview, chash, blob, self._backend.model_id, len(vec), json.dumps(m), now, now))
 
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             conn.executemany("""
                 INSERT OR REPLACE INTO memories
                 (key, text, text_preview, content_hash, vector, model_id, dim, metadata, created_at, updated_at)
@@ -440,7 +457,7 @@ class VectorMemoryStore:
         auto_save: bool = True,
     ):
         """Update an existing memory entry; skips re-embedding if content hash is unchanged."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT content_hash, metadata FROM memories WHERE key = ?", (key,)).fetchone()
 
         chash = _content_hash(text)
@@ -450,7 +467,7 @@ class VectorMemoryStore:
             merged_meta = json.loads(row["metadata"])
             if metadata:
                 merged_meta.update(metadata)
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     "UPDATE memories SET metadata = ?, updated_at = ? WHERE key = ?",
                     (json.dumps(merged_meta), now, key),
@@ -462,17 +479,17 @@ class VectorMemoryStore:
 
     def remove(self, key: str):
         """Delete an entry by key."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             conn.execute("DELETE FROM memories WHERE key = ?", (key,))
 
     def clear(self):
         """Remove all entries."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             conn.execute("DELETE FROM memories")
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         """Retrieve memory entry by key."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT key, text, text_preview, metadata, updated_at FROM memories WHERE key = ?",
                 (key,),
@@ -495,7 +512,7 @@ class VectorMemoryStore:
         since: Optional[float] = None,
         min_score: float = 0.0,
     ) -> List[Dict[str, Any]]:
-        """Semantic search with metadata filtering, model lineage check and atomic re-embedding."""
+        """Semantic search with metadata filtering, model lineage check and batch re-embedding."""
         if not query.strip():
             return []
 
@@ -505,7 +522,7 @@ class VectorMemoryStore:
         target_model = self._backend.model_id
         target_dim = self._backend.dimension
 
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             query_sql = "SELECT key, text, text_preview, vector, model_id, dim, metadata, updated_at FROM memories WHERE 1=1"
             params: List[Any] = []
             if since is not None:
@@ -514,9 +531,11 @@ class VectorMemoryStore:
             rows = conn.execute(query_sql, params).fetchall()
 
         scores: List[Tuple[str, float, sqlite3.Row]] = []
-        stale_reembeds = []
+        stale_indices = []
+        stale_texts = []
+        valid_vectors: Dict[str, List[float]] = {}
 
-        for r in rows:
+        for idx, r in enumerate(rows):
             meta = json.loads(r["metadata"])
             if where and not all(meta.get(k) == v for k, v in where.items()):
                 continue
@@ -525,24 +544,32 @@ class VectorMemoryStore:
             row_dim = r["dim"]
 
             if row_model != target_model or row_dim != target_dim:
-                # Re-embed stale vectors from authoritative complete text
-                new_vec = self._backend.embed(r["text"])
-                stale_reembeds.append((r["key"], _pack_vector(new_vec), target_model, len(new_vec)))
-                stored_vec = new_vec
+                stale_indices.append(idx)
+                stale_texts.append(r["text"])
             else:
-                stored_vec = _unpack_vector(r["vector"])
+                valid_vectors[r["key"]] = _unpack_vector(r["vector"])
 
-            score = _cosine_similarity(query_vec, stored_vec)
-            if score >= min_score:
-                scores.append((r["key"], score, r))
+        # Batch re-embedding for all stale entries at once
+        stale_db_updates = []
+        if stale_texts:
+            new_vecs = self._backend.embed_batch(stale_texts)
+            for idx, vec in zip(stale_indices, new_vecs):
+                row = rows[idx]
+                valid_vectors[row["key"]] = vec
+                stale_db_updates.append((_pack_vector(vec), target_model, len(vec), row["key"]))
 
-        # Asynchronously update stale rows in batch if any occurred
-        if stale_reembeds:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.executemany(
                     "UPDATE memories SET vector = ?, model_id = ?, dim = ? WHERE key = ?",
-                    [(b, m, d, k) for k, b, m, d in stale_reembeds],
+                    stale_db_updates,
                 )
+
+        for r in rows:
+            if r["key"] not in valid_vectors:
+                continue
+            score = _cosine_similarity(query_vec, valid_vectors[r["key"]])
+            if score >= min_score:
+                scores.append((r["key"], score, r))
 
         scores.sort(key=lambda x: x[1], reverse=True)
 
@@ -597,7 +624,7 @@ class VectorMemoryStore:
 
     def get_memory_stats(self) -> Dict[str, Any]:
         """Return memory store statistics."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             total = conn.execute("SELECT COUNT(*) AS cnt FROM memories").fetchone()["cnt"]
             models = conn.execute("SELECT model_id, COUNT(*) as cnt FROM memories GROUP BY model_id").fetchall()
 

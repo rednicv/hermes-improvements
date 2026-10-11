@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v4.0.0)
+# Hermes Improvements Package (v4.0.1)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,7 +11,18 @@ It introduces dynamic vector-backed memory retrieval, adaptive persona alignment
 
 ---
 
-## 🚀 What's New in v4.0.0 (The True Database Architecture)
+## 🚀 What's New in v4.0.1 (Lineage Precision & Resource Safety)
+
+1. **Deterministic Vocabulary Hashing in `model_id`**:
+   - `TfidfBackend` embeds an 8-character SHA-256 fingerprint of the sorted vocabulary keys directly into `model_id` (`tfidf:{vocab_hash}`). Any vocabulary change immediately triggers precise vector invalidation.
+2. **Auto-Closing Context-Managed Connections**:
+   - Implemented `_connection()` context manager ensuring every SQLite connection automatically closes (`conn.close()`) after commits, eliminating resource leaks.
+3. **High-Performance Batch Re-Embedding in `search()`**:
+   - All stale candidate vectors are identified and re-embedded in a single vectorized pass (`embed_batch()`) rather than sequential row-by-row calls.
+
+---
+
+## 🚀 What's New in v4.0.0
 
 1. **SQLite Storage Engine with WAL Mode (`memory_vectors.sqlite`)**:
    - Replaced legacy JSON file rewriting ($O(N)$ write overhead) with native SQLite in WAL mode.
