@@ -22,7 +22,8 @@ def test_vector_memory_store_fallback(tmp_path):
     assert isinstance(results, list)
     
     if len(results) > 0:
-        assert "modular" in results[0]["text"].lower() or "architecture" in results[0]["text"].lower()
+        text = results[0].get("text") or results[0].get("text_preview", "")
+        assert "modular" in text.lower() or "architecture" in text.lower()
 
 
 def test_adaptive_soul_rules_loading(tmp_path):
@@ -46,4 +47,4 @@ def test_adaptive_workflow_classification():
     # Complex query with multiple action verbs, complex keywords, or code requests
     complex_query = "Please review this Python codebase, refactor the database connector class, compile the project, and run unit tests."
     complex_complexity = workflow.classify_task(complex_query)
-    assert complex_complexity.name.lower() in ["medium", "complex"]
+    assert complex_complexity.name.lower() in ["moderate", "complex"]

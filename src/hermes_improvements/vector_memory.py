@@ -363,10 +363,12 @@ class VectorMemoryStore:
                 score = self._cosine_similarity(query_vec, emb)
                 scores.append((key, score, entry))
             elif emb:
-                logger.warning(
-                    "Skipping key '%s' in vector search: embedding dimension mismatch (%d vs query %d)",
-                    key, len(emb), len(query_vec)
-                )
+                # vocabularul a crescut de la indexare -> re-embedare cu vocabularul curent
+                entry["embedding"] = self._compute_embedding(entry.get("text_preview", ""))
+                emb = entry["embedding"]
+                if len(emb) == len(query_vec):
+                    score = self._cosine_similarity(query_vec, emb)
+                    scores.append((key, score, entry))
 
         scores.sort(key=lambda x: x[1], reverse=True)
 
