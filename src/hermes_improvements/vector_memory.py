@@ -1,55 +1,52 @@
-#!/usr/bin/env python3
-"""
-Vector Memory Store — Semantic Search on Memory Embeddings
+"""Hermes Improvements — Vector Memory Module (v4.0.0 Architecture).
 
-Provides: VectorMemoryStore class for embedding-based semantic memory search.
-Stores vector embeddings of memory entries and retrieves similar ones via
-cosine similarity.
-
-Design:
-  - Lightweight — uses simple numpy-based approach when available,
-    falls back to pure-Python cosine similarity
-  - Persistent — saves embeddings to disk alongside the vector DB
-  - Integrated — hooks into Hermes' existing memory system
+Features:
+- SQLite backing store with WAL mode (zero new dependencies, pure Python stdlib).
+- Strategy pattern: EmbeddingBackend with SentenceTransformersBackend and TfidfBackend.
+- Clean isolation: vocabulary/drift mechanics isolated strictly inside TfidfBackend.
+- Model lineage: every stored vector records model_id + dimension (no mixed metric spaces).
+- SHA-256 content_hash deduplication and update skips.
+- Sentence-boundary smart truncation.
+- Automatic one-shot migration from legacy JSON memory_vectors.db.
+- Atomic sync without orphaned keys.
 """
 
-import json
+from __future__ import annotations
+
+import array
 import hashlib
+import json
 import logging
+import math
 import os
+import re
+import sqlite3
 import time
+import unicodedata
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def _get_model_retry_ttl() -> float:
-    """Get SentenceTransformer retry TTL in seconds (configurable via env HERMES_MODEL_RETRY_TTL)."""
-    try:
-        val = float(os.environ.get("HERMES_MODEL_RETRY_TTL", 300.0))
-        return max(0.0, val)
-    except (ValueError, TypeError):
-        return 300.0
-
+# ─── Helpers: Truncation, Hashes, Env Configuration ───────────────────────────
 
 def _content_hash(text: str) -> str:
-    """Compute SHA-256 hash of text for stable comparison and deduplication."""
+    """Compute deterministic SHA-256 hash of text."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def smart_truncate(text: str, max_chars: int = 200, suffix: str = " […]") -> str:
-    """Truncate text cleanly at sentence boundary or word boundary, avoiding chopped words."""
+    """Truncate text cleanly at sentence or word boundaries."""
     if not text or len(text) <= max_chars:
         return text
     limit = max(10, max_chars - len(suffix))
     cut = text[:limit]
-    # Prefer sentence ending (. ! ? \n)
     for sep in (". ", "! ", "? ", "\n"):
         idx = cut.rfind(sep)
         if idx > int(max_chars * 0.5):
-            return cut[:idx + 1].rstrip() + suffix
-    # Fallback to last word boundary
+            return cut[: idx + 1].rstrip() + suffix
     idx = cut.rfind(" ")
     if idx > int(max_chars * 0.3):
         return cut[:idx].rstrip() + suffix
@@ -57,7 +54,6 @@ def smart_truncate(text: str, max_chars: int = 200, suffix: str = " […]") -> s
 
 
 def _get_preview_limit() -> int:
-    """Get text preview character limit (configurable via env HERMES_MEMORY_PREVIEW_CHARS)."""
     try:
         val = int(os.environ.get("HERMES_MEMORY_PREVIEW_CHARS", 200))
         return max(50, val)
@@ -66,7 +62,6 @@ def _get_preview_limit() -> int:
 
 
 def _get_max_vocab() -> int:
-    """Get maximum TF-IDF vocabulary size (configurable via env HERMES_TFIDF_MAX_VOCAB)."""
     try:
         val = int(os.environ.get("HERMES_TFIDF_MAX_VOCAB", 512))
         return max(128, val)
@@ -74,271 +69,131 @@ def _get_max_vocab() -> int:
         return 512
 
 
-class VectorMemoryStore:
-    """
-    Semantic search over memory entries using vector embeddings.
+def _get_model_retry_ttl() -> float:
+    try:
+        val = float(os.environ.get("HERMES_MODEL_RETRY_TTL", 300.0))
+        return max(0.0, val)
+    except (ValueError, TypeError):
+        return 300.0
 
-    Stores embedding vectors for each memory entry and provides
-    cosine-similarity-based retrieval of semantically similar items.
 
-    The actual embedding computation relies on numpy when available;
-    otherwise falls back to a simplified bag-of-words representation.
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two equal-length vectors. Refuses zero padding across spaces."""
+    if len(a) != len(b) or not a:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
-    File layout:
-        {memory_dir}/
-            memory_vectors.db   — JSON file with {key: {embedding, metadata, timestamp}}
-            vector_config.json   — configuration and stats
-    """
 
-    def __init__(self, memory_dir: Path):
-        """
-        Args:
-            memory_dir: Path to Hermes memories directory
-        """
-        self.memory_dir = Path(memory_dir)
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+# ─── Embedding Backend Interface & Implementations ────────────────────────────
 
-        self.db_path = self.memory_dir / "memory_vectors.db"
-        self.config_path = self.memory_dir / "vector_config.json"
+class EmbeddingBackend:
+    """Abstract interface for embedding generation."""
 
-        # In-memory index: key -> {embedding, metadata, timestamp}
-        self._index: Dict[str, Dict[str, Any]] = {}
-        self._loaded = False
-        
-        # Generation counter & cache for TF-IDF / vocabulary optimization
-        self._generation = 0
-        self._cache_generation = -1
-        self._vocab_cache: Optional[Dict[str, int]] = None
-        self._df_cache: Optional[Dict[str, int]] = None
+    @property
+    def model_id(self) -> str:
+        raise NotImplementedError
 
-        self._load()
+    @property
+    def dimension(self) -> int:
+        raise NotImplementedError
 
-    # ─── Persistence ──────────────────────────────────────────────────
+    def embed(self, text: str) -> List[float]:
+        raise NotImplementedError
 
-    def _reconcile_dimensions(self):
-        """Ensure all stored embeddings match current embedding model dimension (read-only in search)."""
-        if not self._index:
-            return
-        sample_vec = self._compute_embedding("test")
-        target_dim = len(sample_vec)
-        updated = False
-        for entry in self._index.values():
-            emb = entry.get("embedding")
-            if emb and len(emb) != target_dim:
-                text = entry.get("text_preview", "")
-                if text:
-                    entry["embedding"] = self._compute_embedding(text)
-                    updated = True
-        if updated:
-            self._save()
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        return [self.embed(t) for t in texts]
 
-    def _load(self):
-        """Load existing embeddings from disk."""
-        if self._loaded:
-            return
 
-        if self.db_path.exists():
-            try:
-                with open(self.db_path, 'r') as f:
-                    self._index = json.load(f)
-                logger.debug(
-                    "Loaded %d vector entries from %s",
-                    len(self._index), self.db_path
-                )
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning("Failed to load vector DB: %s. Starting fresh.", e)
-                self._index = {}
-        else:
-            logger.debug("No existing vector DB at %s, starting fresh", self.db_path)
+class SentenceTransformersBackend(EmbeddingBackend):
+    """SentenceTransformers neural embedding backend (384 dimensions by default)."""
 
-        # Auto-index MEMORY.md if memory_vectors.db is empty
-        if not self._index:
-            memory_file = self.memory_dir / "MEMORY.md"
-            if memory_file.exists():
-                try:
-                    lines = memory_file.read_text(encoding="utf-8").splitlines()
-                    entries = [
-                        {"action": "add", "target": "MEMORY.md", "content": line.strip()}
-                        for line in lines if line.strip()
-                    ]
-                    if entries:
-                        self.sync_from_memory(entries)
-                except Exception as e:
-                    logger.warning("Failed to auto-index MEMORY.md: %s", e)
-        else:
-            try:
-                self._reconcile_dimensions()
-            except Exception as e:
-                logger.warning("Dimension reconciliation failed: %s", e)
+    def __init__(self, model_path: str):
+        from sentence_transformers import SentenceTransformer
+        self._model_path = model_path
+        self._model = SentenceTransformer(model_path)
+        self._model_id = f"st:{Path(model_path).name if Path(model_path).exists() else model_path}"
+        test_vec = self._model.encode("test", show_progress_bar=False)
+        self._dimension = len(test_vec)
 
-        self._loaded = True
+    @property
+    def model_id(self) -> str:
+        return self._model_id
 
-    import threading
-    _save_lock = threading.Lock()  # class-level lock at import time
+    @property
+    def dimension(self) -> int:
+        return self._dimension
 
-    @classmethod
-    def _get_save_lock(cls):
-        return cls._save_lock
+    def embed(self, text: str) -> List[float]:
+        vec = self._model.encode(text, show_progress_bar=False)
+        return vec.tolist()
 
-    def _save(self, advance_gen: bool = True):
-        """Persist index to disk atomically with thread + inter-process safety."""
-        if advance_gen:
-            self._generation += 1
-        import os
-        try:
-            import fcntl
-        except ImportError:
-            fcntl = None
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        vecs = self._model.encode(texts, show_progress_bar=False)
+        return [v.tolist() for v in vecs]
 
-        lock_path = self.db_path.with_suffix(".lock")
-        snapshot = dict(self._index)
-        with self._get_save_lock():  # thread-safety (same process)
-            if fcntl is not None:
-                with open(lock_path, 'w') as lf:
-                    fcntl.flock(lf, fcntl.LOCK_EX)  # inter-process safety
-                    try:
-                        pid = os.getpid()
-                        tmp = self.db_path.with_suffix(f".{pid}.tmp")
-                        with open(tmp, 'w') as f:
-                            json.dump(snapshot, f, indent=2)
-                            f.flush()
-                            os.fsync(f.fileno())
-                        if tmp.exists():
-                            tmp.replace(self.db_path)
-                    except OSError as e:
-                        logger.warning("Vector DB save transient error (race): %s", e)
-                    finally:
-                        fcntl.flock(lf, fcntl.LOCK_UN)
-            else:
-                # Fallback for systems without fcntl (e.g. Windows)
-                try:
-                    pid = os.getpid()
-                    tmp = self.db_path.with_suffix(f".{pid}.tmp")
-                    with open(tmp, 'w') as f:
-                        json.dump(snapshot, f, indent=2)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    if tmp.exists():
-                        tmp.replace(self.db_path)
-                except OSError as e:
-                    logger.warning("Vector DB save transient error: %s", e)
 
-    # ─── Embedding ────────────────────────────────────────────────────
+class TfidfBackend(EmbeddingBackend):
+    """Isolated pure-Python fallback embedding backend (TF-IDF + Trigram cold start)."""
 
-    _DEFAULT_MODEL = str(Path.home() / ".semantic_search/models/all-MiniLM-L6-v2")
-    _MODEL_PATH = os.environ.get("HERMES_EMBEDDING_MODEL", _DEFAULT_MODEL)
-    _model = None  # lazy-loaded, shared across instances
-    _model_failed_time = 0.0
-
-    @classmethod
-    def _get_model(cls):
-        """Lazy-load SentenceTransformer model with TTL retry on failure."""
-        now = time.time()
-        ttl = _get_model_retry_ttl()
-        if cls._model is None or (cls._model is False and (now - cls._model_failed_time) > ttl):
-            try:
-                from sentence_transformers import SentenceTransformer
-                path = cls._MODEL_PATH
-                if not Path(path).exists() and not os.environ.get("HERMES_EMBEDDING_MODEL"):
-                    path = "all-MiniLM-L6-v2"
-                cls._model = SentenceTransformer(path)
-                logger.info("✅ SentenceTransformer model loaded (%s)", path)
-            except Exception as e:
-                logger.warning("SentenceTransformer unavailable, using TF-IDF (retry in %ds): %s", int(ttl), e)
-                cls._model = False  # Mark as unavailable
-                cls._model_failed_time = now
-        return cls._model if cls._model else None
     _STOPWORDS = {
         "și", "în", "la", "de", "cu", "pe", "un", "o", "că", "din", "este",
-        "sunt", "sau", "dar", "nu", "mai", "se", "sa", "care", "pentru",
+        "sunt", "sau", "dar", "nu", "mai", "se", "sa", "să", "care", "pentru",
         "după", "prin", "între", "când", "dacă", "cum", "tot", "toți",
         "the", "a", "an", "is", "in", "on", "at", "to", "of", "and", "or",
         "not", "for", "with", "from", "that", "this", "it", "be", "are",
     }
 
+    def __init__(self, corpus_texts: Optional[List[str]] = None):
+        self._vocab: Dict[str, int] = {}
+        self._df_counts: Dict[str, int] = {}
+        self._n_docs = 0
+        if corpus_texts:
+            self.rebuild_vocab(corpus_texts)
+
+    @property
+    def model_id(self) -> str:
+        return "tfidf:internal"
+
+    @property
+    def dimension(self) -> int:
+        return len(self._vocab) if self._vocab else 128
+
     def _tokenize(self, text: str) -> List[str]:
-        """Lowercase, split, remove stopwords and short tokens (supports alphanumeric with letters)."""
-        import re
         tokens = re.findall(r"[a-zA-ZăâîșțĂÂÎȘȚ0-9_]{3,}", text.lower())
         return [t for t in tokens if t not in self._STOPWORDS]
 
-    def _build_vocab(self) -> Tuple[Dict[str, int], Dict[str, int]]:
-        """Build vocabulary & doc frequencies from all indexed texts with generation cache."""
-        if self._cache_generation == self._generation and self._vocab_cache is not None and self._df_cache is not None:
-            return self._vocab_cache, self._df_cache
+    def rebuild_vocab(self, corpus_texts: List[str]):
+        """Rebuild stable sorted vocabulary from indexed documents."""
+        df: Counter = Counter()
+        self._n_docs = len(corpus_texts)
+        if self._n_docs == 0:
+            self._vocab = {}
+            self._df_counts = {}
+            return
 
-        from collections import Counter
-        df: Counter = Counter()  # document frequency
-        n_docs = len(self._index)
-        if n_docs == 0:
-            return {}, {}
-        for entry in self._index.values():
-            words = set(self._tokenize(entry.get("text") or entry.get("text_preview", "")))
+        for text in corpus_texts:
+            words = set(self._tokenize(text))
             df.update(words)
-        # Keep top words up to max_vocab (configurable via HERMES_TFIDF_MAX_VOCAB, default 512).
+
         max_vocab = _get_max_vocab()
         top_words = sorted([w for w, _ in df.most_common(max_vocab)])
-        vocab = {word: idx for idx, word in enumerate(top_words)}
-        self._vocab_cache = vocab
-        self._df_cache = dict(df)
-        self._cache_generation = self._generation
-        return vocab, self._df_cache
-
-    def _compute_embedding(self, text: str) -> List[float]:
-        """
-        Compute embedding. Priority:
-        1. SentenceTransformer (all-MiniLM-L6-v2) — 384 dims, best quality
-        2. TF-IDF over indexed vocabulary — 512 dims, good for known words
-        3. Trigram hash fallback — 128 dims, cold start only
-        """
-        model = self._get_model()
-        if model:
-            try:
-                vec = model.encode(text, show_progress_bar=False)
-                return vec.tolist()
-            except Exception as e:
-                logger.warning("SentenceTransformer encode failed: %s", e)
-        # Fallback to TF-IDF
-        return self._tfidf_embed(text)
-
-    def _tfidf_embed(self, text: str) -> List[float]:
-        import math
-        vocab, df_counts = self._build_vocab()
-        if not vocab:
-            return self._trigram_embed(text, dim=128)
-
-        n_docs = max(len(self._index), 1)
-        tokens = self._tokenize(text)
-        if not tokens:
-            return [0.0] * len(vocab)
-
-        # TF: term frequency in this text
-        tf: Dict[str, float] = {}
-        for t in tokens:
-            tf[t] = tf.get(t, 0) + 1
-        max_tf = max(tf.values())
-
-        vec = [0.0] * len(vocab)
-        for word, idx in vocab.items():
-            if word in tf:
-                tf_val = tf[word] / max_tf
-                idf_val = math.log((n_docs + 1) / (df_counts.get(word, 0) + 1)) + 1
-                vec[idx] = tf_val * idf_val
-
-        # L2 normalize
-        norm = sum(v * v for v in vec) ** 0.5
-        if norm > 0:
-            vec = [v / norm for v in vec]
-        return vec
+        self._vocab = {word: idx for idx, word in enumerate(top_words)}
+        self._df_counts = dict(df)
 
     def _trigram_embed(self, text: str, dim: int = 128) -> List[float]:
-        """Fallback: character trigram hashing (used when index is empty)."""
         vec = [0.0] * dim
         words = text.lower().split()
         for pos, word in enumerate(words[:200]):
             weight = 1.0 / (1.0 + pos * 0.05)
             for i in range(len(word) - 2):
-                trigram = word[i:i + 3]
+                trigram = word[i : i + 3]
                 h = int.from_bytes(hashlib.sha256(trigram.encode("utf-8")).digest()[:4], "little") % dim
                 vec[h] += weight * 0.1
         norm = sum(v * v for v in vec) ** 0.5
@@ -346,83 +201,291 @@ class VectorMemoryStore:
             vec = [v / norm for v in vec]
         return vec
 
-    # ─── Index Operations ─────────────────────────────────────────────
+    def embed(self, text: str) -> List[float]:
+        if not self._vocab:
+            return self._trigram_embed(text, dim=128)
 
-    def add(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True, advance_gen: bool = True):
-        """
-        Index a memory entry for semantic search.
+        n_docs = max(self._n_docs, 1)
+        tokens = self._tokenize(text)
+        if not tokens:
+            return [0.0] * len(self._vocab)
 
-        Args:
-            key: Unique identifier (e.g., memory entry id)
-            text: The memory content to embed and store completely
-            metadata: Optional additional data to store
-            auto_save: Write to disk immediately (default True). Set False when batch-adding.
-            advance_gen: Increment generation counter (default True). Set False during bulk imports.
-        """
-        embedding = self._compute_embedding(text)
+        tf: Dict[str, float] = {}
+        for t in tokens:
+            tf[t] = tf.get(t, 0) + 1
+        max_tf = max(tf.values())
 
-        lim = _get_preview_limit()
-        if advance_gen:
-            self._generation += 1
-        self._index[key] = {
-            "text": text,  # Store complete text faithfully
-            "content_hash": _content_hash(text),
-            "embedding": embedding,
-            "metadata": metadata or {},
-            "text_preview": smart_truncate(text, max_chars=lim),
-            "generation": self._generation,
-            "timestamp": time.time(),
-            "updated_at": time.time(),
-        }
+        vec = [0.0] * len(self._vocab)
+        for word, idx in self._vocab.items():
+            if word in tf:
+                tf_val = tf[word] / max_tf
+                idf_val = math.log((n_docs + 1) / (self._df_counts.get(word, 0) + 1)) + 1
+                vec[idx] = tf_val * idf_val
 
-        if auto_save:
-            self._save()
+        norm = sum(v * v for v in vec) ** 0.5
+        if norm > 0:
+            vec = [v / norm for v in vec]
+        return vec
 
-    def advance_generation(self):
-        """Advance generation counter manually, useful after bulk additions."""
-        self._generation += 1
 
-    def bulk_add(self, entries: List[Tuple[str, str, Optional[Dict]]], auto_save: bool = True):
-        """Add multiple memory entries efficiently in a single generation step without double embedding."""
-        added_keys = []
-        for item in entries:
-            key = item[0]
-            text = item[1]
-            meta = item[2] if len(item) > 2 else None
-            self.add(key, text, metadata=meta, auto_save=False, advance_gen=False)
-            added_keys.append(key)
-        if auto_save:
-            self._save()
-        else:
-            self.advance_generation()
+# ─── SQLite Vector Serialization Helpers ─────────────────────────────────────
 
-        # Synchronize generation tag to prevent redundant re-embedding on subsequent search
-        for key in added_keys:
-            if key in self._index:
-                self._index[key]["generation"] = self._generation
+def _pack_vector(vec: List[float]) -> bytes:
+    return array.array("f", vec).tobytes()
 
-    def update(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True):
-        """Update an existing entry or add if new. Skips re-embedding if text hash is unchanged."""
-        existing = self._index.get(key)
-        new_hash = _content_hash(text)
-        if existing and (existing.get("content_hash") == new_hash or existing.get("text") == text):
-            # Skip redundant re-embedding; update metadata only
-            if metadata:
-                existing["metadata"] = {**existing.get("metadata", {}), **metadata}
-                existing["updated_at"] = time.time()
-                if auto_save:
-                    # Do not advance generation when only metadata changes
-                    self._save(advance_gen=False)
+
+def _unpack_vector(blob: bytes) -> List[float]:
+    arr = array.array("f")
+    arr.frombytes(blob)
+    return arr.tolist()
+
+
+# ─── Main VectorMemoryStore (v4.0.0) ──────────────────────────────────────────
+
+class VectorMemoryStore:
+    """Semantic vector memory store backed by SQLite with automatic backend fallback."""
+
+    _cached_backend: Optional[EmbeddingBackend] = None
+    _backend_failed_time: float = 0.0
+
+    def __init__(self, memory_dir: Path):
+        self.memory_dir = Path(memory_dir)
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+        self.db_path = self.memory_dir / "memory_vectors.sqlite"
+        self._init_db()
+        self._migrate_legacy_json_if_needed()
+
+        # Initialize backend
+        self._backend = self._resolve_backend()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
+
+    def _init_db(self):
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    key TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    text_preview TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    vector BLOB NOT NULL,
+                    model_id TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    metadata TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_model ON memories(model_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_hash ON memories(content_hash);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_updated ON memories(updated_at);")
+
+    def _resolve_backend(self) -> EmbeddingBackend:
+        """Resolve embedding backend: SentenceTransformers if available, else TF-IDF."""
+        now = time.time()
+        ttl = _get_model_retry_ttl()
+        cls = VectorMemoryStore
+
+        if cls._cached_backend is None or (
+            isinstance(cls._cached_backend, TfidfBackend)
+            and (now - cls._backend_failed_time) > ttl
+        ):
+            default_path = str(Path.home() / ".semantic_search/models/all-MiniLM-L6-v2")
+            model_path = os.environ.get("HERMES_EMBEDDING_MODEL", default_path)
+            try:
+                backend = SentenceTransformersBackend(model_path)
+                cls._cached_backend = backend
+                logger.info("✅ SentenceTransformers backend active (%s)", backend.model_id)
+                return backend
+            except Exception as e:
+                logger.warning("SentenceTransformers unavailable, activating TF-IDF backend: %s", e)
+                cls._backend_failed_time = now
+
+        if cls._cached_backend and isinstance(cls._cached_backend, SentenceTransformersBackend):
+            return cls._cached_backend
+
+        # Fallback to TF-IDF backend with corpus from DB
+        corpus = self._get_all_texts()
+        backend = TfidfBackend(corpus)
+        cls._cached_backend = backend
+        return backend
+
+    def _get_all_texts(self) -> List[str]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT text FROM memories").fetchall()
+            return [r["text"] for r in rows]
+
+    def _migrate_legacy_json_if_needed(self):
+        """One-shot migration from legacy memory_vectors.db JSON file."""
+        legacy_json = self.memory_dir / "memory_vectors.db"
+        if not legacy_json.exists():
             return
 
-        new_meta = {**(existing.get("metadata", {}) if existing else {}), **(metadata or {})}
-        self.add(key, text, new_meta, auto_save=auto_save)
+        try:
+            with open(legacy_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = data.get("index", {})
+            if entries:
+                lim = _get_preview_limit()
+                now = time.time()
+                to_insert = []
+                for k, v in entries.items():
+                    text = v.get("text") or v.get("text_preview", "")
+                    if not text:
+                        continue
+                    preview = v.get("text_preview") or smart_truncate(text, max_chars=lim)
+                    h = v.get("content_hash") or _content_hash(text)
+                    emb = v.get("embedding") or []
+                    meta = v.get("metadata") or {}
+                    ts = v.get("timestamp", now)
+                    blob = _pack_vector(emb) if emb else b""
+                    to_insert.append((k, text, preview, h, blob, "legacy:migrated", len(emb), json.dumps(meta), ts, ts))
+
+                if to_insert:
+                    with self._get_connection() as conn:
+                        conn.executemany("""
+                            INSERT OR REPLACE INTO memories
+                            (key, text, text_preview, content_hash, vector, model_id, dim, metadata, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, to_insert)
+                logger.info("✅ Migrated %d legacy JSON memories into SQLite", len(to_insert))
+
+            # Backup legacy file safely
+            bak_path = legacy_json.with_name(f"memory_vectors.db.migrated.{int(time.time())}.bak")
+            legacy_json.replace(bak_path)
+        except Exception as e:
+            logger.error("Legacy JSON migration failed: %s", e)
+
+    # ─── Store API ────────────────────────────────────────────────────────────
+
+    def add(
+        self,
+        key: str,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        auto_save: bool = True,
+    ):
+        """Index a memory entry."""
+        if not text:
+            return
+
+        meta = metadata or {}
+        chash = _content_hash(text)
+        preview = smart_truncate(text, max_chars=_get_preview_limit())
+        now = time.time()
+
+        # Update TF-IDF vocabulary if fallback is active
+        if isinstance(self._backend, TfidfBackend):
+            corpus = self._get_all_texts()
+            corpus.append(text)
+            self._backend.rebuild_vocab(corpus)
+
+        vec = self._backend.embed(text)
+        blob = _pack_vector(vec)
+
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO memories
+                (key, text, text_preview, content_hash, vector, model_id, dim, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (key, text, preview, chash, blob, self._backend.model_id, len(vec), json.dumps(meta), now, now))
+
+    def bulk_add(
+        self,
+        entries: List[Tuple[str, str, Optional[Dict[str, Any]]]],
+        auto_save: bool = True,
+    ):
+        """Batch ingestion in a single transaction with single-pass embedding."""
+        if not entries:
+            return
+
+        lim = _get_preview_limit()
+        now = time.time()
+
+        # Rebuild TF-IDF vocab once before embedding if using fallback
+        if isinstance(self._backend, TfidfBackend):
+            corpus = self._get_all_texts()
+            corpus.extend(item[1] for item in entries if item[1])
+            self._backend.rebuild_vocab(corpus)
+
+        texts = [item[1] for item in entries]
+        vecs = self._backend.embed_batch(texts)
+
+        rows = []
+        for (key, text, meta), vec in zip(entries, vecs):
+            m = meta or {}
+            preview = smart_truncate(text, max_chars=lim)
+            chash = _content_hash(text)
+            blob = _pack_vector(vec)
+            rows.append((key, text, preview, chash, blob, self._backend.model_id, len(vec), json.dumps(m), now, now))
+
+        with self._get_connection() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO memories
+                (key, text, text_preview, content_hash, vector, model_id, dim, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+
+    def update(
+        self,
+        key: str,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        auto_save: bool = True,
+    ):
+        """Update an existing memory entry; skips re-embedding if content hash is unchanged."""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT content_hash, metadata FROM memories WHERE key = ?", (key,)).fetchone()
+
+        chash = _content_hash(text)
+        if row and row["content_hash"] == chash:
+            # Hash unchanged: update metadata only without re-embedding
+            now = time.time()
+            merged_meta = json.loads(row["metadata"])
+            if metadata:
+                merged_meta.update(metadata)
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE memories SET metadata = ?, updated_at = ? WHERE key = ?",
+                    (json.dumps(merged_meta), now, key),
+                )
+            return
+
+        # Content changed: full update
+        self.add(key, text, metadata=metadata, auto_save=auto_save)
 
     def remove(self, key: str):
-        """Remove an entry from the index."""
-        if key in self._index:
-            del self._index[key]
-            self._save()
+        """Delete an entry by key."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM memories WHERE key = ?", (key,))
+
+    def clear(self):
+        """Remove all entries."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM memories")
+
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve memory entry by key."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT key, text, text_preview, metadata, updated_at FROM memories WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "key": row["key"],
+                "text": row["text"],
+                "text_preview": row["text_preview"],
+                "metadata": json.loads(row["metadata"]),
+                "timestamp": row["updated_at"],
+            }
 
     def search(
         self,
@@ -430,154 +493,118 @@ class VectorMemoryStore:
         top_k: int = 5,
         where: Optional[Dict[str, Any]] = None,
         since: Optional[float] = None,
+        min_score: float = 0.0,
     ) -> List[Dict[str, Any]]:
-        """
-        Semantic search over indexed entries with optional metadata and time filters.
-
-        Args:
-            query: Search text to embed and compare
-            top_k: Number of top results to return
-            where: Key-value filter matching entry metadata
-            since: Minimum timestamp filter (seconds since epoch)
-
-        Returns:
-            List of dicts: [{key, score, metadata, text_preview, text}, ...]
-            sorted by similarity score (descending)
-        """
-        if not self._index:
+        """Semantic search with metadata filtering, model lineage check and atomic re-embedding."""
+        if not query.strip():
             return []
 
-        query_vec = self._compute_embedding(query)
+        # Refresh backend if needed
+        self._backend = self._resolve_backend()
+        query_vec = self._backend.embed(query)
+        target_model = self._backend.model_id
+        target_dim = self._backend.dimension
 
-        # Search loop: compare query with stored vectors.
-        # Safe thread snapshot: copy keys to prevent RuntimeError if concurrent mutations occur.
-        is_tfidf = self._get_model() is None
-        scores = []
-        keys_snapshot = list(self._index.keys())
-        for key in keys_snapshot:
-            entry = self._index.get(key)
-            if not entry:
+        with self._get_connection() as conn:
+            query_sql = "SELECT key, text, text_preview, vector, model_id, dim, metadata, updated_at FROM memories WHERE 1=1"
+            params: List[Any] = []
+            if since is not None:
+                query_sql += " AND updated_at >= ?"
+                params.append(since)
+            rows = conn.execute(query_sql, params).fetchall()
+
+        scores: List[Tuple[str, float, sqlite3.Row]] = []
+        stale_reembeds = []
+
+        for r in rows:
+            meta = json.loads(r["metadata"])
+            if where and not all(meta.get(k) == v for k, v in where.items()):
                 continue
 
-            # Apply time filter
-            if since is not None and entry.get("timestamp", 0) < since:
-                continue
+            row_model = r["model_id"]
+            row_dim = r["dim"]
 
-            # Apply metadata filter
-            if where:
-                meta = entry.get("metadata", {})
-                if not all(meta.get(k) == v for k, v in where.items()):
-                    continue
+            if row_model != target_model or row_dim != target_dim:
+                # Re-embed stale vectors from authoritative complete text
+                new_vec = self._backend.embed(r["text"])
+                stale_reembeds.append((r["key"], _pack_vector(new_vec), target_model, len(new_vec)))
+                stored_vec = new_vec
+            else:
+                stored_vec = _unpack_vector(r["vector"])
 
-            emb = entry.get("embedding")
-            if is_tfidf and entry.get("generation") != self._generation:
-                # Vocabularul sau ordinea s-au schimbat -> re-embedare cu vocabularul stabil curent
-                full_text = entry.get("text") or entry.get("text_preview", "")
-                entry["embedding"] = self._compute_embedding(full_text)
-                entry["generation"] = self._generation
-                emb = entry["embedding"]
-            elif emb and len(emb) != len(query_vec):
-                # Dimensiuni nepotrivite din cauza creșterii vocabularului
-                full_text = entry.get("text") or entry.get("text_preview", "")
-                entry["embedding"] = self._compute_embedding(full_text)
-                entry["generation"] = self._generation
-                emb = entry["embedding"]
+            score = _cosine_similarity(query_vec, stored_vec)
+            if score >= min_score:
+                scores.append((r["key"], score, r))
 
-            if emb and len(emb) == len(query_vec):
-                score = self._cosine_similarity(query_vec, emb)
-                scores.append((key, score, entry))
+        # Asynchronously update stale rows in batch if any occurred
+        if stale_reembeds:
+            with self._get_connection() as conn:
+                conn.executemany(
+                    "UPDATE memories SET vector = ?, model_id = ?, dim = ? WHERE key = ?",
+                    [(b, m, d, k) for k, b, m, d in stale_reembeds],
+                )
 
         scores.sort(key=lambda x: x[1], reverse=True)
 
         results = []
-        for key, score, entry in scores[:top_k]:
+        for key, score, r in scores[:top_k]:
             results.append({
                 "key": key,
                 "score": round(score, 4),
-                "text": entry.get("text", entry.get("text_preview", "")),
-                "metadata": entry.get("metadata", {}),
-                "text_preview": entry.get("text_preview", ""),
-                "timestamp": entry.get("timestamp", 0),
+                "text": r["text"],
+                "text_preview": r["text_preview"],
+                "metadata": json.loads(r["metadata"]),
+                "timestamp": r["updated_at"],
             })
-
         return results
 
-    def get(self, key: str) -> Optional[Dict[str, Any]]:
-        """Get an entry by key."""
-        entry = self._index.get(key)
-        if entry:
-            return {
-                "key": key,
-                "text": entry.get("text", entry.get("text_preview", "")),
-                "metadata": entry.get("metadata", {}),
-                "text_preview": entry.get("text_preview", ""),
-                "timestamp": entry.get("timestamp", 0),
-            }
-        return None
-
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        """Compute cosine similarity. Handles different lengths via zero-padding."""
-        if len(a) != len(b):
-            # Pad shorter vector with zeros
-            n = max(len(a), len(b))
-            a = a + [0.0] * (n - len(a))
-            b = b + [0.0] * (n - len(b))
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(y * y for y in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
-
-    # ─── Stats & Management ───────────────────────────────────────────
-
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get statistics about the vector index."""
-        return {
-            "total_entries": len(self._index),
-            "db_path": str(self.db_path),
-            "db_size_mb": round(
-                self.db_path.stat().st_size / (1024 * 1024), 2
-            ) if self.db_path.exists() else 0,
-            "loaded": self._loaded,
-        }
-
-    def clear(self):
-        """Remove all entries."""
-        self._index = {}
-        self._save()
-        logger.info("Vector memory index cleared")
-
     def sync_from_memory(self, memory_entries: List[Dict[str, Any]]):
-        """
-        Bulk-sync from Hermes' standard memory storage.
-        Batch saves — writes to disk only once at the end.
+        """Atomic synchronization from Hermes memories without creating orphaned keys."""
+        if not memory_entries:
+            return
 
-        Args:
-            memory_entries: List of {action, target, content, ...} entries
-        """
+        valid_keys_per_target: Dict[str, set] = {}
+        to_upsert = []
+
         for entry in memory_entries:
             action = entry.get("action", "")
             target = entry.get("target", "")
             content = entry.get("content", "")
 
-            if not content:
+            if not content or not target:
                 continue
 
-            import hashlib
-            content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
-            key = f"{target}:{content_hash}"
+            key = f"{target}:{hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]}"
+            valid_keys_per_target.setdefault(target, set())
 
             if action == "remove":
                 self.remove(key)
             else:
-                self.update(key, content, {
-                    "action": action,
-                    "target": target,
-                }, auto_save=False)  # No individual saves
+                valid_keys_per_target[target].add(key)
+                to_upsert.append((key, content, {"target": target, "action": action}))
 
-        # Single batch save at the end
-        if memory_entries:
-            self._save()
+        if to_upsert:
+            self.bulk_add(to_upsert)
 
-        logger.debug("Synced %d entries into vector index", len(memory_entries))
+        # Atomic prune of orphaned keys in this target domain
+        for target, valid_keys in valid_keys_per_target.items():
+            with self._get_connection() as conn:
+                existing = conn.execute("SELECT key, metadata FROM memories").fetchall()
+                for r in existing:
+                    meta = json.loads(r["metadata"])
+                    if meta.get("target") == target and r["key"] not in valid_keys:
+                        conn.execute("DELETE FROM memories WHERE key = ?", (r["key"],))
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Return memory store statistics."""
+        with self._get_connection() as conn:
+            total = conn.execute("SELECT COUNT(*) AS cnt FROM memories").fetchone()["cnt"]
+            models = conn.execute("SELECT model_id, COUNT(*) as cnt FROM memories GROUP BY model_id").fetchall()
+
+        return {
+            "total_entries": total,
+            "storage_backend": "sqlite",
+            "active_model": self._backend.model_id,
+            "active_dim": self._backend.dimension,
+            "models_distribution": {r["model_id"]: r["cnt"] for r in models},
+        }

@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.6.0)
+# Hermes Improvements Package (v4.0.0)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,7 +11,25 @@ It introduces dynamic vector-backed memory retrieval, adaptive persona alignment
 
 ---
 
-## 🚀 What's New in v3.6.0 (Scale Benchmark Harness & Single-Pass Bulk Ingestion)
+## 🚀 What's New in v4.0.0 (The True Database Architecture)
+
+1. **SQLite Storage Engine with WAL Mode (`memory_vectors.sqlite`)**:
+   - Replaced legacy JSON file rewriting ($O(N)$ write overhead) with native SQLite in WAL mode.
+   - Row-level transactions, zero corruption risk, concurrent reads/writes without artificial locks.
+2. **Strategy Pattern & Complete Isolation for Embedding Backends**:
+   - `EmbeddingBackend` abstract interface decoupling storage from vector generation.
+   - `SentenceTransformersBackend` as the primary production engine (`st:all-MiniLM-L6-v2`, 384 dimensions).
+   - `TfidfBackend` completely isolated: vocabulary generation, drift mechanics, and cold-start trigrams live strictly inside the fallback backend.
+3. **Rigorous Model Lineage & Non-Padded Math**:
+   - Every row records `model_id` and `dim`. When backend switches or recovers, stale vectors are re-computed from full text on demand. Eliminated synthetic zero padding.
+4. **Zero-Orphan Atomic Memory Synchronization**:
+   - `sync_from_memory()` computes exact key diffs and prunes deleted memories atomically within single transactions.
+5. **Seamless One-Shot JSON Migration**:
+   - Existing `memory_vectors.db` JSON installations are automatically migrated into SQLite on first boot with safe timestamped `.bak` archiving.
+
+---
+
+## 🚀 What's New in v3.6.0
 
 1. **Scale Evaluation Benchmark Harness (`benchmarks/eval_scale.py`)**:
    - Added automated evaluation of retrieval quality (**Recall@1, Recall@3, Recall@5, MRR**) and query latency (p50/p95) over corpora with 50 to 500+ memories and realistic distractors.

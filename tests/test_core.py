@@ -58,21 +58,20 @@ def test_tfidf_dimension_drift_regression(tmp_path, monkeypatch):
 
 
 def test_bulk_add_no_double_embedding(tmp_path):
-    """Test that bulk_add synchronizes generation to prevent double embedding on first search."""
+    """Test that bulk_add inserts all entries into SQLite efficiently."""
     store = VectorMemoryStore(memory_dir=tmp_path)
     entries = [
         (f"k_{i}", f"Continut unic memorie {i} pentru validare bulk", {"idx": i})
         for i in range(10)
     ]
     store.bulk_add(entries)
-    # Target entry generation must match store generation immediately
-    assert store._index["k_0"]["generation"] == store._generation
+    stats = store.get_memory_stats()
+    assert stats["total_entries"] == 10
 
-    # Search should NOT cause re-embedding
-    initial_gen = store._generation
+    # Search returns correct target
     res = store.search("memorie 0", top_k=1)
     assert len(res) == 1
-    assert store._generation == initial_gen
+    assert res[0]["key"] == "k_0"
 
 
 def test_bulk_add_and_dynamic_vocab(tmp_path, monkeypatch):
@@ -84,8 +83,9 @@ def test_bulk_add_and_dynamic_vocab(tmp_path, monkeypatch):
         for i in range(20)
     ]
     store.bulk_add(entries)
-    # Check that generation only advanced once for the whole batch
-    assert store._generation == 1
+    stats = store.get_memory_stats()
+    assert stats["total_entries"] == 20
+
     # Check search over batch for item_5
     res = store.search("item_5", top_k=1)
     assert len(res) == 1

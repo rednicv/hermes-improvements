@@ -33,14 +33,12 @@ def test_content_hash_and_update_skip(tmp_path):
     entry = store.get("k_long")
     assert entry is not None
     assert entry["text"] == long_text
-    orig_gen = store._generation
 
     # Update with the exact same long text but updated metadata
     store.update("k_long", long_text, metadata={"category": "updated", "extra": 123})
 
-    # Generation should NOT have advanced because text hash is identical
-    assert store._generation == orig_gen
     updated_entry = store.get("k_long")
+    assert updated_entry is not None
     assert updated_entry["metadata"]["category"] == "updated"
     assert updated_entry["metadata"]["extra"] == 123
 
@@ -49,11 +47,13 @@ def test_search_with_metadata_and_time_filters(tmp_path):
     store = VectorMemoryStore(memory_dir=tmp_path)
     t0 = time.time() - 100
     store.add("doc_py", "Python scripting for automation and backend systems.", metadata={"lang": "python", "env": "prod"})
-    store._index["doc_py"]["timestamp"] = t0
+    with store._get_connection() as conn:
+        conn.execute("UPDATE memories SET updated_at = ? WHERE key = ?", (t0, "doc_py"))
 
     t1 = time.time()
     store.add("doc_rust", "Rust systems programming with ownership and borrowing.", metadata={"lang": "rust", "env": "prod"})
-    store._index["doc_rust"]["timestamp"] = t1
+    with store._get_connection() as conn:
+        conn.execute("UPDATE memories SET updated_at = ? WHERE key = ?", (t1, "doc_rust"))
 
     # Search with metadata filter
     res_py = store.search("programming systems", top_k=5, where={"lang": "python"})
