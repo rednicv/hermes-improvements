@@ -383,16 +383,23 @@ class VectorMemoryStore:
         self._generation += 1
 
     def bulk_add(self, entries: List[Tuple[str, str, Optional[Dict]]], auto_save: bool = True):
-        """Add multiple memory entries efficiently in a single generation step."""
+        """Add multiple memory entries efficiently in a single generation step without double embedding."""
+        added_keys = []
         for item in entries:
             key = item[0]
             text = item[1]
             meta = item[2] if len(item) > 2 else None
             self.add(key, text, metadata=meta, auto_save=False, advance_gen=False)
+            added_keys.append(key)
         if auto_save:
             self._save()
         else:
             self.advance_generation()
+
+        # Synchronize generation tag to prevent redundant re-embedding on subsequent search
+        for key in added_keys:
+            if key in self._index:
+                self._index[key]["generation"] = self._generation
 
     def update(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True):
         """Update an existing entry or add if new. Skips re-embedding if text hash is unchanged."""

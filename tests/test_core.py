@@ -57,6 +57,24 @@ def test_tfidf_dimension_drift_regression(tmp_path, monkeypatch):
     assert store.get("k_0")["text"] == "Prima memorie importanta despre python si arhitectura hermes."
 
 
+def test_bulk_add_no_double_embedding(tmp_path):
+    """Test that bulk_add synchronizes generation to prevent double embedding on first search."""
+    store = VectorMemoryStore(memory_dir=tmp_path)
+    entries = [
+        (f"k_{i}", f"Continut unic memorie {i} pentru validare bulk", {"idx": i})
+        for i in range(10)
+    ]
+    store.bulk_add(entries)
+    # Target entry generation must match store generation immediately
+    assert store._index["k_0"]["generation"] == store._generation
+
+    # Search should NOT cause re-embedding
+    initial_gen = store._generation
+    res = store.search("memorie 0", top_k=1)
+    assert len(res) == 1
+    assert store._generation == initial_gen
+
+
 def test_bulk_add_and_dynamic_vocab(tmp_path, monkeypatch):
     """Test bulk_add and dynamic HERMES_TFIDF_MAX_VOCAB configuration."""
     monkeypatch.setenv("HERMES_TFIDF_MAX_VOCAB", "256")
