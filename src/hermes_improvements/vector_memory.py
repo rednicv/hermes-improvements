@@ -24,6 +24,29 @@ from typing import Dict, List, Optional, Any, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _content_hash(text: str) -> str:
+    """Compute SHA-256 hash of text for stable comparison and deduplication."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def smart_truncate(text: str, max_chars: int = 200, suffix: str = " […]") -> str:
+    """Truncate text cleanly at sentence boundary or word boundary, avoiding chopped words."""
+    if not text or len(text) <= max_chars:
+        return text
+    limit = max(10, max_chars - len(suffix))
+    cut = text[:limit]
+    # Prefer sentence ending (. ! ? \n)
+    for sep in (". ", "! ", "? ", "\n"):
+        idx = cut.rfind(sep)
+        if idx > int(max_chars * 0.5):
+            return cut[:idx + 1].rstrip() + suffix
+    # Fallback to last word boundary
+    idx = cut.rfind(" ")
+    if idx > int(max_chars * 0.3):
+        return cut[:idx].rstrip() + suffix
+    return cut.rstrip() + suffix
+
+
 def _get_preview_limit() -> int:
     """Get text preview character limit (configurable via env HERMES_MEMORY_PREVIEW_CHARS)."""
     try:
@@ -148,9 +171,10 @@ class VectorMemoryStore:
     def _get_save_lock(cls):
         return cls._save_lock
 
-    def _save(self):
+    def _save(self, advance_gen: bool = True):
         """Persist index to disk atomically with thread + inter-process safety."""
-        self._generation += 1
+        if advance_gen:
+            self._generation += 1
         import os
         try:
             import fcntl
@@ -333,9 +357,10 @@ class VectorMemoryStore:
             self._generation += 1
         self._index[key] = {
             "text": text,  # Store complete text faithfully
+            "content_hash": _content_hash(text),
             "embedding": embedding,
             "metadata": metadata or {},
-            "text_preview": text[:lim],
+            "text_preview": smart_truncate(text, max_chars=lim),
             "generation": self._generation,
             "timestamp": time.time(),
             "updated_at": time.time(),
@@ -361,15 +386,17 @@ class VectorMemoryStore:
             self.advance_generation()
 
     def update(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True):
-        """Update an existing entry or add if new. Skips re-embedding if text is unchanged."""
+        """Update an existing entry or add if new. Skips re-embedding if text hash is unchanged."""
         existing = self._index.get(key)
-        if existing and existing.get("text_preview") == text:
+        new_hash = _content_hash(text)
+        if existing and (existing.get("content_hash") == new_hash or existing.get("text") == text):
             # Skip redundant re-embedding; update metadata only
             if metadata:
                 existing["metadata"] = {**existing.get("metadata", {}), **metadata}
                 existing["updated_at"] = time.time()
                 if auto_save:
-                    self._save()
+                    # Do not advance generation when only metadata changes
+                    self._save(advance_gen=False)
             return
 
         new_meta = {**(existing.get("metadata", {}) if existing else {}), **(metadata or {})}
@@ -381,16 +408,24 @@ class VectorMemoryStore:
             del self._index[key]
             self._save()
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        where: Optional[Dict[str, Any]] = None,
+        since: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Semantic search over indexed entries.
+        Semantic search over indexed entries with optional metadata and time filters.
 
         Args:
             query: Search text to embed and compare
             top_k: Number of top results to return
+            where: Key-value filter matching entry metadata
+            since: Minimum timestamp filter (seconds since epoch)
 
         Returns:
-            List of dicts: [{key, score, metadata, text_preview}, ...]
+            List of dicts: [{key, score, metadata, text_preview, text}, ...]
             sorted by similarity score (descending)
         """
         if not self._index:
@@ -403,6 +438,16 @@ class VectorMemoryStore:
         is_tfidf = self._get_model() is None
         scores = []
         for key, entry in self._index.items():
+            # Apply time filter
+            if since is not None and entry.get("timestamp", 0) < since:
+                continue
+
+            # Apply metadata filter
+            if where:
+                meta = entry.get("metadata", {})
+                if not all(meta.get(k) == v for k, v in where.items()):
+                    continue
+
             emb = entry.get("embedding")
             if is_tfidf and entry.get("generation") != self._generation:
                 # Vocabularul sau ordinea s-au schimbat -> re-embedare cu vocabularul stabil curent
@@ -428,6 +473,7 @@ class VectorMemoryStore:
             results.append({
                 "key": key,
                 "score": round(score, 4),
+                "text": entry.get("text", entry.get("text_preview", "")),
                 "metadata": entry.get("metadata", {}),
                 "text_preview": entry.get("text_preview", ""),
                 "timestamp": entry.get("timestamp", 0),

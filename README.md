@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.4.0)
+# Hermes Improvements Package (v3.5.0)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,6 +8,21 @@
 An architectural enhancement suite for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. 
 
 It introduces dynamic vector-backed memory retrieval, adaptive persona alignment, real-time reasoning tracing, intelligent task classification, and live token savings telemetry without breaking per-conversation prompt caching.
+
+---
+
+## 🚀 What's New in v3.5.0 (Audited by Claude Opus 5.5)
+
+1. **SHA-256 Content Hashing & Skip Re-embedding**:
+   - `update()` calculates a deterministic SHA-256 hash (`content_hash`) of memory texts. Redundant re-embedding passes for long texts with identical content are skipped losslessly.
+2. **Metadata & Time-Filtered Vector Search**:
+   - `search()` accepts `where: dict` for precise metadata key-value filtering and `since: float` for minimum epoch timestamp queries.
+3. **Smart Sentence-Boundary Truncation**:
+   - Replaced naive character cutting with `smart_truncate()`, honoring natural sentence terminators (`. `, `! `, `? `, `\n`) or word boundaries with ` […]` ellipsis.
+4. **Prompt Injection Hardening & Untrusted Delimitation**:
+   - All injected memories are tagged as untrusted data blocks and sanitized against lookalike delimiters (`[hermes-improvements`, `<system>`), zero-width Unicode characters, and bidi override vectors.
+5. **Comprehensive Integration Test Suite**:
+   - Added `tests/test_integration.py` covering smart truncation, hash updates, metadata/time filtering, anti-injection sanitization, and dynamic telemetry baselines (10/10 test suite pass).
 
 ---
 
