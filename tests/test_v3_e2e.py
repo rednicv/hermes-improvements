@@ -103,7 +103,7 @@ def main():
         patch_agent_for_improvements,
     )
 
-    check("versiune 3.x", __version__.startswith("3."), __version__)
+    check("versiune 4.x sau 3.x", __version__.startswith(("3.", "4.")), __version__)
 
     # ---- hook installs on an object that has run_conversation ----
     a = fresh(integ)
