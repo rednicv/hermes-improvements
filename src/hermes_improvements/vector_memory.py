@@ -24,6 +24,15 @@ from typing import Dict, List, Optional, Any, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _get_model_retry_ttl() -> float:
+    """Get SentenceTransformer retry TTL in seconds (configurable via env HERMES_MODEL_RETRY_TTL)."""
+    try:
+        val = float(os.environ.get("HERMES_MODEL_RETRY_TTL", 300.0))
+        return max(0.0, val)
+    except (ValueError, TypeError):
+        return 300.0
+
+
 def _content_hash(text: str) -> str:
     """Compute SHA-256 hash of text for stable comparison and deduplication."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -220,13 +229,13 @@ class VectorMemoryStore:
     _MODEL_PATH = os.environ.get("HERMES_EMBEDDING_MODEL", _DEFAULT_MODEL)
     _model = None  # lazy-loaded, shared across instances
     _model_failed_time = 0.0
-    _MODEL_RETRY_TTL = 300.0  # retry loading after 5 minutes on failure
 
     @classmethod
     def _get_model(cls):
         """Lazy-load SentenceTransformer model with TTL retry on failure."""
         now = time.time()
-        if cls._model is None or (cls._model is False and (now - cls._model_failed_time) > cls._MODEL_RETRY_TTL):
+        ttl = _get_model_retry_ttl()
+        if cls._model is None or (cls._model is False and (now - cls._model_failed_time) > ttl):
             try:
                 from sentence_transformers import SentenceTransformer
                 path = cls._MODEL_PATH
@@ -235,7 +244,7 @@ class VectorMemoryStore:
                 cls._model = SentenceTransformer(path)
                 logger.info("✅ SentenceTransformer model loaded (%s)", path)
             except Exception as e:
-                logger.warning("SentenceTransformer unavailable, using TF-IDF (retry in %ds): %s", int(cls._MODEL_RETRY_TTL), e)
+                logger.warning("SentenceTransformer unavailable, using TF-IDF (retry in %ds): %s", int(ttl), e)
                 cls._model = False  # Mark as unavailable
                 cls._model_failed_time = now
         return cls._model if cls._model else None
@@ -434,10 +443,15 @@ class VectorMemoryStore:
         query_vec = self._compute_embedding(query)
 
         # Search loop: compare query with stored vectors.
-        # If model is TF-IDF (self._get_model() is None), ensure embeddings match current generation.
+        # Safe thread snapshot: copy keys to prevent RuntimeError if concurrent mutations occur.
         is_tfidf = self._get_model() is None
         scores = []
-        for key, entry in self._index.items():
+        keys_snapshot = list(self._index.keys())
+        for key in keys_snapshot:
+            entry = self._index.get(key)
+            if not entry:
+                continue
+
             # Apply time filter
             if since is not None and entry.get("timestamp", 0) < since:
                 continue

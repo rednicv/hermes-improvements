@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.5.0)
+# Hermes Improvements Package (v3.5.1)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,7 +11,20 @@ It introduces dynamic vector-backed memory retrieval, adaptive persona alignment
 
 ---
 
-## 🚀 What's New in v3.5.0 (Audited by Claude Opus 5.5)
+## 🚀 What's New in v3.5.1 (Opus 5.5 Deep Audit Hardening)
+
+1. **Thread-Safe Search Iteration**:
+   - `search()` iterates over a safe key snapshot (`list(self._index.keys())`), preventing `RuntimeError: dictionary changed size during iteration` during concurrent re-embeddings or background writes.
+2. **Exfiltration & Homoglyph Injection Defense**:
+   - Upgraded `_sanitize_untrusted_text` with Unicode NFKC normalization (resolving confusable Cyrillic/Greek/fullwidth homoglyphs) and automated neutralizing of markdown image exfiltration payloads (`![alt](http...)` -> `[image-disabled: ...]`).
+3. **Unified Memory Preview Limits**:
+   - Context block memory preview is dynamically tied to `HERMES_MEMORY_PREVIEW_CHARS` using sentence-boundary `smart_truncate()`, eliminating hardcoded snippet magic numbers.
+4. **Configurable Model Retry TTL**:
+   - Added `HERMES_MODEL_RETRY_TTL` environment variable (default 300s, 0 for immediate retry) controlling SentenceTransformer reload cadence.
+
+---
+
+## 🚀 What's New in v3.5.0
 
 1. **SHA-256 Content Hashing & Skip Re-embedding**:
    - `update()` calculates a deterministic SHA-256 hash (`content_hash`) of memory texts. Redundant re-embedding passes for long texts with identical content are skipped losslessly.
