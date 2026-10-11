@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.3.0)
+# Hermes Improvements Package (v3.3.1)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,6 +8,17 @@
 An architectural enhancement suite for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. 
 
 It introduces dynamic vector-backed memory retrieval, adaptive persona alignment, real-time reasoning tracing, intelligent task classification, and live token savings telemetry without breaking per-conversation prompt caching.
+
+---
+
+## 🚀 What's New in v3.3.1
+
+1. **TF-IDF Vocabulary Stability & Discriminative Power**:
+   - Retained hapax legomena (words with single document occurrences) in vocabulary construction; highly discriminative personal memory tokens (names, specific technical identifiers) are no longer discarded.
+   - Guaranteed deterministic vocabulary indexing via sorted alphabetical ordering of features across calls.
+   - Added generation-tracking to vector entries: out-of-sync embeddings are refreshed on-the-fly during search.
+2. **Hardened Regression Testing**:
+   - Upgraded `test_tfidf_dimension_drift_regression` to assert strict rank ordering and positive similarity score (`score > 0.05`), ensuring genuine semantic retrieval over insertion-order artifacts.
 
 ---
 

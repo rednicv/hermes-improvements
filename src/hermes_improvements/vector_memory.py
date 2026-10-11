@@ -229,12 +229,11 @@ class VectorMemoryStore:
         for entry in self._index.values():
             words = set(self._tokenize(entry.get("text_preview", "")))
             df.update(words)
-        # Keep top-512 words by document frequency, excluding hapax
-        vocab = {
-            word: idx
-            for idx, (word, count) in enumerate(df.most_common(512))
-            if count > 1 or n_docs <= 5
-        }
+        # Keep top-512 words. Do NOT exclude hapax legomena: in personal memory stores,
+        # rare words (occurring in only 1 doc) are the most discriminative (names, specific terms).
+        # Sort words alphabetically to guarantee stable feature-to-index mapping across calls.
+        top_words = sorted([w for w, _ in df.most_common(512)])
+        vocab = {word: idx for idx, word in enumerate(top_words)}
         self._vocab_cache = vocab
         self._df_cache = dict(df)
         self._cache_generation = self._generation
@@ -317,10 +316,12 @@ class VectorMemoryStore:
         embedding = self._compute_embedding(text)
 
         lim = _get_preview_limit()
+        self._generation += 1
         self._index[key] = {
             "embedding": embedding,
             "metadata": metadata or {},
             "text_preview": text[:lim],
+            "generation": self._generation,
             "timestamp": time.time(),
             "updated_at": time.time(),
         }
@@ -366,19 +367,26 @@ class VectorMemoryStore:
 
         query_vec = self._compute_embedding(query)
 
+        # Search loop: compare query with stored vectors.
+        # If model is TF-IDF (self._get_model() is None), ensure embeddings match current generation.
+        is_tfidf = self._get_model() is None
         scores = []
         for key, entry in self._index.items():
             emb = entry.get("embedding")
+            if is_tfidf and entry.get("generation") != self._generation:
+                # Vocabularul sau ordinea s-au schimbat -> re-embedare cu vocabularul stabil curent
+                entry["embedding"] = self._compute_embedding(entry.get("text_preview", ""))
+                entry["generation"] = self._generation
+                emb = entry["embedding"]
+            elif emb and len(emb) != len(query_vec):
+                # Dimensiuni nepotrivite din cauza creșterii vocabularului
+                entry["embedding"] = self._compute_embedding(entry.get("text_preview", ""))
+                entry["generation"] = self._generation
+                emb = entry["embedding"]
+
             if emb and len(emb) == len(query_vec):
                 score = self._cosine_similarity(query_vec, emb)
                 scores.append((key, score, entry))
-            elif emb:
-                # vocabularul a crescut de la indexare -> re-embedare cu vocabularul curent
-                entry["embedding"] = self._compute_embedding(entry.get("text_preview", ""))
-                emb = entry["embedding"]
-                if len(emb) == len(query_vec):
-                    score = self._cosine_similarity(query_vec, emb)
-                    scores.append((key, score, entry))
 
         scores.sort(key=lambda x: x[1], reverse=True)
 

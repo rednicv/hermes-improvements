@@ -50,6 +50,8 @@ def test_tfidf_dimension_drift_regression(tmp_path, monkeypatch):
     results = store.search("arhitectura hermes python", top_k=3)
     keys = [r["key"] for r in results]
     assert "k_0" in keys, f"k_0 should be retrieved via auto-re-embedding! Found: {keys}"
+    assert results[0]["key"] == "k_0", f"k_0 must be top result, got: {results[0]['key']}"
+    assert results[0]["score"] > 0.05, f"k_0 must have a positive similarity score, got: {results[0]['score']}"
     assert len(results[0]["text_preview"]) <= 300
 
 
