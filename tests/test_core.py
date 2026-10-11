@@ -53,6 +53,27 @@ def test_tfidf_dimension_drift_regression(tmp_path, monkeypatch):
     assert results[0]["key"] == "k_0", f"k_0 must be top result, got: {results[0]['key']}"
     assert results[0]["score"] > 0.05, f"k_0 must have a positive similarity score, got: {results[0]['score']}"
     assert len(results[0]["text_preview"]) <= 300
+    # Verify that full text is retained
+    assert store.get("k_0")["text"] == "Prima memorie importanta despre python si arhitectura hermes."
+
+
+def test_bulk_add_and_dynamic_vocab(tmp_path, monkeypatch):
+    """Test bulk_add and dynamic HERMES_TFIDF_MAX_VOCAB configuration."""
+    monkeypatch.setenv("HERMES_TFIDF_MAX_VOCAB", "256")
+    store = VectorMemoryStore(memory_dir=tmp_path)
+    entries = [
+        (f"b_{i}", f"Continut memorie batch item_{i} cu detalii complete despre sistem.", {"source": "bulk"})
+        for i in range(20)
+    ]
+    store.bulk_add(entries)
+    # Check that generation only advanced once for the whole batch
+    assert store._generation == 1
+    # Check search over batch for item_5
+    res = store.search("item_5", top_k=1)
+    assert len(res) == 1
+    assert res[0]["key"] == "b_5"
+    assert res[0]["score"] > 0.5
+
 
 
 def test_adaptive_workflow_classification():

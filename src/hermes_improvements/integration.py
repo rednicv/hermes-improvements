@@ -761,12 +761,25 @@ def get_agent_stats(agent_instance) -> dict:
     if wf:
         stats["components"]["workflow_metrics"] = wf.metrics.get_stats()
 
-    # Baseline without improvements is full injection: MEMORY.md + USER.md + raw soul rules (~2400 tokens / 9600 chars)
-    # Each turn improvements injects a selective block (~150 tokens / 600 chars).
-    # Token estimation: ~4 chars per token.
     blocks_injected = int(getattr(agent_instance, "_hermes_blocks_injected", 0))
     chars_injected = int(getattr(agent_instance, "_hermes_chars_injected", 0))
-    baseline_tokens_est = blocks_injected * 2400
+
+    # Dynamic baseline calculation: measure actual raw text that would be injected
+    # (MEMORY.md + USER.md + uncompacted soul rules) instead of a hardcoded constant.
+    hermes_home = getattr(agent_instance, "_hermes_home", Path.home() / ".hermes")
+    raw_chars = 0
+    try:
+        mem_dir = Path(hermes_home) / "memories"
+        for fname in ["MEMORY.md", "USER.md"]:
+            f = mem_dir / fname
+            if f.exists():
+                raw_chars += len(f.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        raw_chars = 9600
+
+    # Minimum baseline 9600 chars (~2400 tokens)
+    baseline_chars_per_turn = max(9600, raw_chars)
+    baseline_tokens_est = blocks_injected * (baseline_chars_per_turn // 4)
     actual_tokens_est = (chars_injected // 4) if chars_injected > 0 else (blocks_injected * 150)
     saved_tokens_est = max(0, baseline_tokens_est - actual_tokens_est)
 

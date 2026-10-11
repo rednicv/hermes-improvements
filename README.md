@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v3.3.1)
+# Hermes Improvements Package (v3.4.0)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,6 +8,21 @@
 An architectural enhancement suite for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. 
 
 It introduces dynamic vector-backed memory retrieval, adaptive persona alignment, real-time reasoning tracing, intelligent task classification, and live token savings telemetry without breaking per-conversation prompt caching.
+
+---
+
+## 🚀 What's New in v3.4.0
+
+1. **Full Memory Text Preservation**:
+   - The entire memory text is retained losslessly in `entry["text"]`; trimming to preview limit only occurs on prompt injection or display.
+2. **High-Performance Bulk Ingestion (`bulk_add`)**:
+   - Added batch insertion with single-generation advancement (`bulk_add`), preventing massive re-embedding cascades during bulk imports.
+3. **Dynamic Real-World Telemetry Baseline**:
+   - Telemetry baseline measures the exact size of actual memory sources (`MEMORY.md`, `USER.md`, soul rules) dynamically rather than relying on a hardcoded token estimate.
+4. **Transient Failure Recovery for SentenceTransformer**:
+   - `_get_model()` implements a TTL retry mechanism (5 minutes) so temporary load failures do not permanently lock the system in fallback mode.
+5. **Configurable TF-IDF Capacity**:
+   - Vocabulary size is configurable via `HERMES_TFIDF_MAX_VOCAB` (default 512, floor 128) and tokenization natively retains technical alphanumeric identifiers.
 
 ---
 

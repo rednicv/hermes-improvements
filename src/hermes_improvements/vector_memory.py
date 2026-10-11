@@ -33,6 +33,15 @@ def _get_preview_limit() -> int:
         return 200
 
 
+def _get_max_vocab() -> int:
+    """Get maximum TF-IDF vocabulary size (configurable via env HERMES_TFIDF_MAX_VOCAB)."""
+    try:
+        val = int(os.environ.get("HERMES_TFIDF_MAX_VOCAB", 512))
+        return max(128, val)
+    except (ValueError, TypeError):
+        return 512
+
+
 class VectorMemoryStore:
     """
     Semantic search over memory entries using vector embeddings.
@@ -186,11 +195,14 @@ class VectorMemoryStore:
     _DEFAULT_MODEL = str(Path.home() / ".semantic_search/models/all-MiniLM-L6-v2")
     _MODEL_PATH = os.environ.get("HERMES_EMBEDDING_MODEL", _DEFAULT_MODEL)
     _model = None  # lazy-loaded, shared across instances
+    _model_failed_time = 0.0
+    _MODEL_RETRY_TTL = 300.0  # retry loading after 5 minutes on failure
 
     @classmethod
     def _get_model(cls):
-        """Lazy-load SentenceTransformer model (cached at class level)."""
-        if cls._model is None:
+        """Lazy-load SentenceTransformer model with TTL retry on failure."""
+        now = time.time()
+        if cls._model is None or (cls._model is False and (now - cls._model_failed_time) > cls._MODEL_RETRY_TTL):
             try:
                 from sentence_transformers import SentenceTransformer
                 path = cls._MODEL_PATH
@@ -199,8 +211,9 @@ class VectorMemoryStore:
                 cls._model = SentenceTransformer(path)
                 logger.info("✅ SentenceTransformer model loaded (%s)", path)
             except Exception as e:
-                logger.warning("SentenceTransformer unavailable, using TF-IDF: %s", e)
+                logger.warning("SentenceTransformer unavailable, using TF-IDF (retry in %ds): %s", int(cls._MODEL_RETRY_TTL), e)
                 cls._model = False  # Mark as unavailable
+                cls._model_failed_time = now
         return cls._model if cls._model else None
     _STOPWORDS = {
         "și", "în", "la", "de", "cu", "pe", "un", "o", "că", "din", "este",
@@ -211,9 +224,9 @@ class VectorMemoryStore:
     }
 
     def _tokenize(self, text: str) -> List[str]:
-        """Lowercase, split, remove stopwords and short tokens."""
+        """Lowercase, split, remove stopwords and short tokens (supports alphanumeric with letters)."""
         import re
-        tokens = re.findall(r"[a-zA-ZăâîșțĂÂÎȘȚ]{3,}", text.lower())
+        tokens = re.findall(r"[a-zA-ZăâîșțĂÂÎȘȚ0-9_]{3,}", text.lower())
         return [t for t in tokens if t not in self._STOPWORDS]
 
     def _build_vocab(self) -> Tuple[Dict[str, int], Dict[str, int]]:
@@ -227,12 +240,11 @@ class VectorMemoryStore:
         if n_docs == 0:
             return {}, {}
         for entry in self._index.values():
-            words = set(self._tokenize(entry.get("text_preview", "")))
+            words = set(self._tokenize(entry.get("text") or entry.get("text_preview", "")))
             df.update(words)
-        # Keep top-512 words. Do NOT exclude hapax legomena: in personal memory stores,
-        # rare words (occurring in only 1 doc) are the most discriminative (names, specific terms).
-        # Sort words alphabetically to guarantee stable feature-to-index mapping across calls.
-        top_words = sorted([w for w, _ in df.most_common(512)])
+        # Keep top words up to max_vocab (configurable via HERMES_TFIDF_MAX_VOCAB, default 512).
+        max_vocab = _get_max_vocab()
+        top_words = sorted([w for w, _ in df.most_common(max_vocab)])
         vocab = {word: idx for idx, word in enumerate(top_words)}
         self._vocab_cache = vocab
         self._df_cache = dict(df)
@@ -303,21 +315,24 @@ class VectorMemoryStore:
 
     # ─── Index Operations ─────────────────────────────────────────────
 
-    def add(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True):
+    def add(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True, advance_gen: bool = True):
         """
         Index a memory entry for semantic search.
 
         Args:
             key: Unique identifier (e.g., memory entry id)
-            text: The memory content to embed
+            text: The memory content to embed and store completely
             metadata: Optional additional data to store
             auto_save: Write to disk immediately (default True). Set False when batch-adding.
+            advance_gen: Increment generation counter (default True). Set False during bulk imports.
         """
         embedding = self._compute_embedding(text)
 
         lim = _get_preview_limit()
-        self._generation += 1
+        if advance_gen:
+            self._generation += 1
         self._index[key] = {
+            "text": text,  # Store complete text faithfully
             "embedding": embedding,
             "metadata": metadata or {},
             "text_preview": text[:lim],
@@ -328,6 +343,22 @@ class VectorMemoryStore:
 
         if auto_save:
             self._save()
+
+    def advance_generation(self):
+        """Advance generation counter manually, useful after bulk additions."""
+        self._generation += 1
+
+    def bulk_add(self, entries: List[Tuple[str, str, Optional[Dict]]], auto_save: bool = True):
+        """Add multiple memory entries efficiently in a single generation step."""
+        for item in entries:
+            key = item[0]
+            text = item[1]
+            meta = item[2] if len(item) > 2 else None
+            self.add(key, text, metadata=meta, auto_save=False, advance_gen=False)
+        if auto_save:
+            self._save()
+        else:
+            self.advance_generation()
 
     def update(self, key: str, text: str, metadata: Optional[Dict] = None, auto_save: bool = True):
         """Update an existing entry or add if new. Skips re-embedding if text is unchanged."""
@@ -375,12 +406,14 @@ class VectorMemoryStore:
             emb = entry.get("embedding")
             if is_tfidf and entry.get("generation") != self._generation:
                 # Vocabularul sau ordinea s-au schimbat -> re-embedare cu vocabularul stabil curent
-                entry["embedding"] = self._compute_embedding(entry.get("text_preview", ""))
+                full_text = entry.get("text") or entry.get("text_preview", "")
+                entry["embedding"] = self._compute_embedding(full_text)
                 entry["generation"] = self._generation
                 emb = entry["embedding"]
             elif emb and len(emb) != len(query_vec):
                 # Dimensiuni nepotrivite din cauza creșterii vocabularului
-                entry["embedding"] = self._compute_embedding(entry.get("text_preview", ""))
+                full_text = entry.get("text") or entry.get("text_preview", "")
+                entry["embedding"] = self._compute_embedding(full_text)
                 entry["generation"] = self._generation
                 emb = entry["embedding"]
 
@@ -408,6 +441,7 @@ class VectorMemoryStore:
         if entry:
             return {
                 "key": key,
+                "text": entry.get("text", entry.get("text_preview", "")),
                 "metadata": entry.get("metadata", {}),
                 "text_preview": entry.get("text_preview", ""),
                 "timestamp": entry.get("timestamp", 0),
