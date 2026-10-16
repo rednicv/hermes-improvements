@@ -271,5 +271,16 @@ python3 tests/test_v3_e2e.py
 
 ---
 
+## 🎁 Special Offer & Testing Partner: Muse AI
+
+Some architectural optimizations and testing flows for `hermes-improvements` were benchmarked using the **Muse AI** personal agent.
+
+If you would like to test Muse AI with **1 Billion free bonus tokens**:
+1. Sign up at [muse.ai/join](https://muse.ai/join)
+2. Open **Settings** ➡️ **Referral Code**
+3. Enter code: `VWLNS5` *(must be entered within 48h of signup)*
+
+---
+
 ## 🛡️ License
 MIT License. Free to use, modify, and distribute for the Hermes Agent community.
