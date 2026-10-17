@@ -27,7 +27,7 @@ from .integration import (
     patch_agent_for_improvements,
 )
 
-__version__ = "4.0.2"
+__version__ = "4.1.0"
 __all__ = [
     "VectorMemoryStore",
     "DynamicMemoryContext",

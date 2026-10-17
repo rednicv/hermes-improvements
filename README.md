@@ -1,4 +1,4 @@
-# Hermes Improvements Package (v4.0.2)
+# Hermes Improvements Package (v4.1.0)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,6 +8,17 @@
 An architectural enhancement suite for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. 
 
 It introduces dynamic vector-backed memory retrieval, adaptive persona alignment, real-time reasoning tracing, intelligent task classification, and live token savings telemetry without breaking per-conversation prompt caching.
+
+---
+
+## 🚀 What's New in v4.1.0 (Decoupled CI & Architecture Hardening)
+
+1. **GitHub Actions Continuous Integration**:
+   - Automated workflow testing package installations and test suites across Python 3.10, 3.11, and 3.12 without external environment assumptions.
+2. **Dedicated Modular Unit Test Suites**:
+   - Added standalone unit tests for `VectorMemoryStore` (`test_vector_memory.py`) and `AdaptiveWorkflow` (`test_adaptive_workflow.py`).
+3. **Decoupled Workflow Architecture (Opus 5.5 Audit Validated)**:
+   - Preserves pure procedural complexity scoring in `AdaptiveWorkflow` cleanly separated from model delegation routing policies.
 
 ---
 
